@@ -23,6 +23,13 @@ A personal to-do list application. Owned and run by Humanth Shashani (@shashanih
 - Moving a symbol fixes its docs and `AGENTS.md` references in the same PR.
 - `.env` holds secrets only; behaviour settings live in config files.
 
+## Building this app
+
+- The domain model is a single pure reducer seam — `Document`/`Card`/`Task`/`Edge` types plus a reducer and queries; UI and storage are thin adapters over it.
+- Four invariants are the contract, pinned test-first: hierarchy completion, transitive blocking + full lock, sibling uniqueness, and acyclicity.
+- Skills by layer: `/tdd` (domain + storage round-trip), `/shadcn` (UI components), `/animate` + `/review-animations` (motion), `/pr` + `/pr-evidence` (every PR), `/to-spec` + `/to-tickets` (planning).
+- Theme is pastel-only (light + dark) by design; there is no `/theme` skill — theme decisions live in the spec and its tickets.
+
 ## Routing — working in X → read X/AGENTS.md
 
 | Area | Read | Covers |
