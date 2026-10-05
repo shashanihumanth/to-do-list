@@ -1,0 +1,19 @@
+{
+  "name": "to-do-list",
+  "version": "0.1.0",
+  "description": "A personal to-do list application.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "scripts/run_tests.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

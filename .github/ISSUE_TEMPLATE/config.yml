@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/shashanihumanth/to-do-list/security/advisories/new
+    about: Report privately. Read SECURITY.md for scope first.

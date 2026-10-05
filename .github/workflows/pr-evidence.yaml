@@ -1,0 +1,36 @@
+name: PR evidence
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+jobs:
+  pr-evidence:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require Before/After evidence
+        env:
+          BODY: ${{ github.event.pull_request.body }}   # via env, never interpolated into the script
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          body = re.sub(r"<!--.*?-->", "", os.environ.get("BODY") or "", flags=re.S)
+          m = re.search(r"^## Evidence[ \t]*\n(.*?)(?=^## |\Z)", body, re.S | re.M)
+          section = m.group(1).strip() if m else ""
+          def fail(msg):
+              print(f"::error::{msg}"); sys.exit(1)
+          if not section:
+              fail("PR body needs an '## Evidence' section.")
+          if re.search(r"N/A\s*[—–-]\s*\S{3,}", section):
+              sys.exit(0)  # waiver with a stated reason
+          def part(label):
+              p = re.search(rf"\*\*{label}\*\*(.*?)(?=\*\*(?:Before|After)\*\*|\Z)", section, re.S | re.I)
+              return p.group(1) if p else ""
+          for label in ("Before", "After"):
+              text = part(label)
+              artifact = chr(96) * 3 in text or re.search(r"https?://|!\[", text)   # fenced block, link or image; prose alone does not count
+              if not artifact or len(re.sub(r"[`\s]", "", text)) < 20:
+                  fail(f"Evidence needs a filled **{label}** block: a fenced command + output, a screenshot, or a run URL; or 'N/A — <reason>'.")
+          PY

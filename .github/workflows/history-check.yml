@@ -1,0 +1,22 @@
+name: History check
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  history-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Reject orphaned history
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=2 origin "$BASE_REF"
+          if [ -z "$(git merge-base "$BASE_REF" HEAD)" ]; then
+            echo "::error::PR has no common ancestor with the base branch (orphaned history). Rebase onto main."
+            exit 1
+          fi

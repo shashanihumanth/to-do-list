@@ -1,0 +1,7 @@
+# CI-executing and install-affecting paths require owner review.
+# A solo repo adds the owner as a ruleset bypass actor (authors cannot self-approve).
+/.github/           @shashanihumanth
+/scripts/           @shashanihumanth
+package.json        @shashanihumanth
+package-lock.json   @shashanihumanth
+SECURITY.md         @shashanihumanth
