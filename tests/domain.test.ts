@@ -16,6 +16,7 @@ import {
   toggleTaskComplete,
   type Document,
   type Result,
+  type Task,
 } from "../src/domain.js";
 
 /** Unwrap a successful result, failing the test on a rejection. */
@@ -266,5 +267,109 @@ describe("completion derivation", () => {
     };
     expect(isCardComplete(withTask)).toBe(true);
     expect(isCardComplete({ ...withTask, tasks: [{ ...withTask.tasks[0]!, completed: false }] })).toBe(false);
+  });
+});
+
+describe("sub-tasks & recursive completion", () => {
+  /** Find a task by title anywhere in a card's task tree. */
+  function taskByTitle(tasks: readonly Task[], title: string): Task | undefined {
+    for (const task of tasks) {
+      if (task.title === title) return task;
+      const found = taskByTitle(task.subtasks, title);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  /** Build `R → [A → [A1], B]` and return every task id. */
+  function buildTree(doc: Document, cardId: string) {
+    let d = valueOf(addTask(doc, cardId, "R"));
+    const rId = taskByTitle(d.cards[0]!.tasks, "R")!.id;
+    d = valueOf(addTask(d, cardId, "A", rId));
+    const aId = taskByTitle(d.cards[0]!.tasks, "A")!.id;
+    d = valueOf(addTask(d, cardId, "A1", aId));
+    const a1Id = taskByTitle(d.cards[0]!.tasks, "A1")!.id;
+    d = valueOf(addTask(d, cardId, "B", rId));
+    const bId = taskByTitle(d.cards[0]!.tasks, "B")!.id;
+    return { doc: d, rId, aId, a1Id, bId };
+  }
+
+  /** Build a single chain of `depth` nested tasks; returns the doc and the deepest leaf id. */
+  function buildChain(doc: Document, cardId: string, depth: number): { doc: Document; leafId: string } {
+    let d = doc;
+    let parentId: string | undefined;
+    let leafId = "";
+    for (let i = 0; i < depth; i++) {
+      d = valueOf(addTask(d, cardId, `level-${i}`, parentId));
+      leafId = taskByTitle(d.cards[0]!.tasks, `level-${i}`)!.id;
+      parentId = leafId;
+    }
+    return { doc: d, leafId };
+  }
+
+  it("nests sub-tasks to unlimited depth", () => {
+    const { doc, cardId } = docWithCard();
+    const { doc: built } = buildChain(doc, cardId, 5);
+    // Walk the single chain down: each task nests exactly one sub-task until the leaf.
+    let tasks = built.cards[0]!.tasks;
+    for (let depth = 0; depth < 5; depth++) {
+      expect(tasks[0]!.title).toBe(`level-${depth}`);
+      tasks = tasks[0]!.subtasks;
+    }
+    expect(tasks).toEqual([]);
+  });
+
+  it("completion derives up a chain of arbitrary depth", () => {
+    const { doc, cardId } = docWithCard();
+    const { doc: built, leafId } = buildChain(doc, cardId, 5);
+
+    // The whole chain — and the card — is incomplete until the single leaf is toggled.
+    expect(isTaskComplete(taskByTitle(built.cards[0]!.tasks, "level-0")!)).toBe(false);
+    expect(isCardComplete(built.cards[0]!)).toBe(false);
+
+    // Toggle the deepest leaf: completion propagates up all five levels to the card.
+    const done = valueOf(toggleTaskComplete(built, leafId));
+    expect(isTaskComplete(taskByTitle(done.cards[0]!.tasks, "level-0")!)).toBe(true);
+    expect(isCardComplete(done.cards[0]!)).toBe(true);
+
+    // Un-toggle it: the entire chain un-completes.
+    const undone = valueOf(toggleTaskComplete(done, leafId));
+    expect(isTaskComplete(taskByTitle(undone.cards[0]!.tasks, "level-0")!)).toBe(false);
+    expect(isCardComplete(undone.cards[0]!)).toBe(false);
+  });
+
+  it("a task is complete only when all its sub-tasks, recursively, are complete", () => {
+    const { doc, cardId } = docWithCard();
+    const tree = buildTree(doc, cardId);
+    // Complete A1 only: A derives complete, but B is not, so R stays incomplete.
+    let d = valueOf(toggleTaskComplete(tree.doc, tree.a1Id));
+    expect(isTaskComplete(taskByTitle(d.cards[0]!.tasks, "A")!)).toBe(true);
+    expect(isTaskComplete(taskByTitle(d.cards[0]!.tasks, "R")!)).toBe(false);
+    // Complete B: now every leaf is done, so R derives complete.
+    d = valueOf(toggleTaskComplete(d, tree.bId));
+    expect(isTaskComplete(taskByTitle(d.cards[0]!.tasks, "R")!)).toBe(true);
+  });
+
+  it("a card completes only when its whole tree is complete, and un-completes when a deep leaf is un-toggled", () => {
+    const { doc, cardId } = docWithCard();
+    const tree = buildTree(doc, cardId);
+    let d = valueOf(toggleTaskComplete(tree.doc, tree.a1Id));
+    d = valueOf(toggleTaskComplete(d, tree.bId));
+    expect(isCardComplete(d.cards[0]!)).toBe(true);
+
+    // Un-toggle the deep leaf A1: A, then R, then the card all un-complete.
+    d = valueOf(toggleTaskComplete(d, tree.a1Id));
+    expect(isTaskComplete(taskByTitle(d.cards[0]!.tasks, "A")!)).toBe(false);
+    expect(isTaskComplete(taskByTitle(d.cards[0]!.tasks, "R")!)).toBe(false);
+    expect(isCardComplete(d.cards[0]!)).toBe(false);
+  });
+
+  it("rejects toggling a parent even when its sub-tasks are complete (completion is derived)", () => {
+    const { doc, cardId } = docWithCard();
+    const tree = buildTree(doc, cardId);
+    const d = valueOf(toggleTaskComplete(tree.doc, tree.a1Id));
+    // A is derived-complete, but still has no manual toggle.
+    expect(toggleTaskComplete(d, tree.aId)).toEqual({ ok: false, error: "not-leaf-task" });
+    expect(isTaskComplete(taskByTitle(d.cards[0]!.tasks, "A")!)).toBe(true);
   });
 });

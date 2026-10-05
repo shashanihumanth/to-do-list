@@ -1,7 +1,7 @@
 <!doctype html>
 <!--
-  Minimal demo of the domain model (Ticket #1). A dependency-free list UI that
-  renders cards and their tasks and lets you tick a task complete.
+  Minimal demo of the domain model. A dependency-free list UI that renders
+  cards with nested sub-tasks (indented) and lets you tick a leaf complete.
 
   Build once, then serve the repo root (ES modules need HTTP, not file://):
 
@@ -73,8 +73,26 @@
         color: #4c9a89;
       }
       ul.tasks { list-style: none; margin: 0; padding: 0; }
-      li { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; }
-      li.done > label { text-decoration: line-through; color: var(--muted); }
+      li { padding: 0.3rem 0; }
+      .row { display: flex; align-items: center; gap: 0.5rem; }
+      li.done .row label { text-decoration: line-through; color: var(--muted); }
+      input[type="checkbox"]:disabled { opacity: 0.5; }
+      ul.tasks ul.tasks {
+        padding-left: 1.5rem;
+        margin-left: 0.4rem;
+        border-left: 1px solid var(--line);
+      }
+      .add-sub {
+        font-size: 0.72rem;
+        padding: 0.1rem 0.45rem;
+        background: transparent;
+        color: var(--muted);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+      .add-sub:hover { color: var(--ink); }
+      .sub-form { display: flex; gap: 0.4rem; padding: 0.3rem 0 0.3rem 1.5rem; }
+      .sub-form input { flex: 1; }
       .empty { color: var(--muted); font-size: 0.9rem; }
     </style>
   </head>
@@ -94,6 +112,7 @@
         addTask,
         createDocument,
         isCardComplete,
+        isTaskComplete,
         toggleTaskComplete,
       } from "../dist/domain.js";
 
@@ -134,7 +153,7 @@
 
         const list = document.createElement("ul");
         list.className = "tasks";
-        for (const task of card.tasks) list.appendChild(renderTask(task));
+        for (const task of card.tasks) list.appendChild(renderTask(task, card.id));
         el.appendChild(list);
 
         const add = document.createElement("div");
@@ -159,27 +178,82 @@
         return el;
       }
 
-      function renderTask(task) {
+      function renderTask(task, cardId) {
         const li = document.createElement("li");
-        if (task.completed) li.classList.add("done");
+        const complete = isTaskComplete(task);
+        const isLeaf = task.subtasks.length === 0;
+        if (complete) li.classList.add("done");
 
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.checked = task.completed;
-        input.addEventListener("change", () => {
+        const row = document.createElement("div");
+        row.className = "row";
+
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = complete;
+        // Completion of a parent is derived from its sub-tasks; only leaves toggle.
+        checkbox.disabled = !isLeaf;
+        checkbox.addEventListener("change", () => {
           const result = toggleTaskComplete(doc, task.id);
           if (result.ok) {
             doc = result.value;
             render();
           }
         });
-        li.appendChild(input);
+        row.appendChild(checkbox);
 
         const label = document.createElement("label");
         label.textContent = task.title;
-        li.appendChild(label);
+        row.appendChild(label);
+
+        const addSub = document.createElement("button");
+        addSub.className = "add-sub";
+        addSub.textContent = "+ sub";
+        addSub.title = "Add a sub-task";
+        addSub.addEventListener("click", () => appendSubTaskForm(li, cardId, task.id));
+        row.appendChild(addSub);
+
+        li.appendChild(row);
+
+        if (task.subtasks.length > 0) {
+          const children = document.createElement("ul");
+          children.className = "tasks";
+          for (const child of task.subtasks) children.appendChild(renderTask(child, cardId));
+          li.appendChild(children);
+        }
 
         return li;
+      }
+
+      function appendSubTaskForm(li, cardId, parentId) {
+        const form = document.createElement("div");
+        form.className = "sub-form";
+
+        const input = document.createElement("input");
+        input.type = "text";
+        input.placeholder = "Sub-task title…";
+
+        const submit = () => {
+          const title = input.value;
+          if (title.trim() === "") return;
+          const result = addTask(doc, cardId, title, parentId);
+          if (result.ok) {
+            doc = result.value;
+            render();
+          } else {
+            alert(`Could not add sub-task: ${result.error}`);
+          }
+        };
+
+        const button = document.createElement("button");
+        button.textContent = "Add";
+        button.addEventListener("click", submit);
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") submit();
+        });
+
+        form.append(input, button);
+        li.appendChild(form);
+        input.focus();
       }
 
       document.getElementById("add-card").addEventListener("click", () => {
