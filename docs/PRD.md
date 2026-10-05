@@ -4,7 +4,7 @@
 
 ## Description
 
-A premium, card-based to-do web app. Each card is a container of related tasks; tasks support nested sub-tasks; cards can be linked into a dependency graph. A parent cannot be marked complete until everything beneath it is done. Personal, local-only (browser storage), with JSON export/import, and light and dark themes built entirely from a pastel palette.
+A premium, card-based to-do web app. Each card is a container of related tasks; tasks support nested sub-tasks; cards link into a flow-ordered graph where a card cannot start until its prerequisite cards are done. A parent cannot be marked complete until everything beneath it is done. Personal, local-only (browser storage), with JSON export/import, and light and dark themes built entirely from a pastel palette.
 
 ## Problem
 
@@ -21,7 +21,7 @@ Not solving: collaboration, scheduling, or cross-device sync.
 
 ## Success — how we'll know it's solved
 
-1. **Completion integrity** — a task or card can never be marked complete while any sub-task or upstream card is incomplete (enforced by the model, not a soft warning).
+1. **Completion & blocking integrity** — a task can never be marked complete while a sub-task is incomplete, and a card can never start while a prerequisite card is incomplete (both enforced by the model, not a soft warning).
 2. **No duplicates** — no two tasks in a card share a normalized title; adding a duplicate is rejected or surfaced, never silently created.
 3. **Fast entry** — a new task can be added in ≤ 2 seconds (single field + Enter), with no modal or extra confirmation.
 4. **Feels premium, always legible** — every state is legible in light and dark mode using only the pastel palette, and interactions animate smoothly with no layout jump or theme flash.
@@ -37,8 +37,8 @@ The core model in eight moving pieces:
 1. **Card** — a titled container of tasks; create, edit, delete.
 2. **Task** — an item in a card; add, edit, delete, complete. Titles are normalized (trim + case) to catch duplicates.
 3. **Sub-task** — tasks nest into a tree (not just one level).
-4. **Completion rule** — a task is completable only when its sub-tasks are complete; a card only when its tasks are.
-5. **Dependency graph** — cards link with directed edges; a card can't complete until its upstream cards complete.
+4. **Completion rule** — a task is completable only when its sub-tasks are complete; a card only when its tasks are (a card needs ≥1 task to be completable).
+5. **Dependency graph** — cards link with directed edges in flow order; a card can't *start* until its prerequisite cards complete, and is read-only while blocked.
 6. **Graph view** — cards and edges rendered as a flow chart, readable at a glance.
 7. **Theme toggle** — light/dark, persisted, pastel-only, no flash on load.
 8. **Animation** — add, complete, move, and theme-switch are animated and interruptible.
@@ -54,5 +54,5 @@ The core model in eight moving pieces:
 ## Decisions & risks
 
 - **Sub-task depth** — unlimited nesting, rendered with indentation.
-- **Dependency cycles** — detected and rejected on connect; a card that transitively depends on itself can never complete.
+- **Dependency cycles** — detected and rejected on connect; a card that transitively precedes itself is impossible and rejected.
 - **Data durability** — JSON export/import included in v1 as the backup/move escape hatch (localStorage stays the source of truth).
