@@ -415,7 +415,9 @@
         isCardComplete,
         isTaskComplete,
         removeEdge,
+        renameCard,
         renameTask,
+        reorderTasks,
         toggleTaskComplete,
         topologicalOrder,
       } from "../dist/domain.js";
@@ -1037,6 +1039,16 @@
           badge.textContent = "Complete";
           head.appendChild(badge);
         }
+        // Renaming is editing the card, so it locks with everything else while
+        // the card is blocked.
+        const renameCardButton = document.createElement("button");
+        renameCardButton.type = "button";
+        renameCardButton.className = "mini-action";
+        renameCardButton.textContent = "rename";
+        renameCardButton.title = "Rename this card";
+        renameCardButton.disabled = blocked;
+        renameCardButton.addEventListener("click", () => startRenameCard(title, card, el, head));
+        head.appendChild(renameCardButton);
         const removeCard = document.createElement("button");
         removeCard.type = "button";
         removeCard.className = "mini-action";
@@ -1059,7 +1071,9 @@
 
         const list = document.createElement("ul");
         list.className = "tasks";
-        for (const task of card.tasks) list.appendChild(renderTask(task, card.id, blocked, cues));
+        for (const [index, task] of card.tasks.entries()) {
+          list.appendChild(renderTask(task, card.id, blocked, cues, { card, index }));
+        }
         el.appendChild(list);
 
         const add = document.createElement("div");
@@ -1069,10 +1083,18 @@
         input.placeholder = "New task…";
         input.disabled = blocked;
         input.addEventListener("input", () => clearError(el));
+        // Enter is the fast path: one field, no modal, no confirmation.
+        const submitTask = () => {
+          if (input.value.trim() === "") return;
+          applyResult(addTask(doc, card.id, input.value), el, add);
+        };
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") submitTask();
+        });
         const button = document.createElement("button");
         button.textContent = "Add task";
         button.disabled = blocked;
-        button.addEventListener("click", () => applyResult(addTask(doc, card.id, input.value), el, add));
+        button.addEventListener("click", submitTask);
         add.append(input, button);
         el.appendChild(add);
 
@@ -1132,7 +1154,7 @@
         return el;
       }
 
-      function renderTask(task, cardId, blocked, cues) {
+      function renderTask(task, cardId, blocked, cues, position) {
         const li = document.createElement("li");
         const complete = isTaskComplete(task);
         const isLeaf = task.subtasks.length === 0;
@@ -1177,6 +1199,32 @@
         renameButton.disabled = blocked;
         renameButton.addEventListener("click", () => startRename(label, task));
         row.appendChild(renameButton);
+
+        // Reordering is a card-level command, so it is offered only on a card's
+        // own tasks — and only when there is more than one to order.
+        if (position !== undefined && position.card.tasks.length > 1) {
+          const { card, index } = position;
+          const moveTo = (target) => {
+            const ids = card.tasks.map((t) => t.id);
+            [ids[index], ids[target]] = [ids[target], ids[index]];
+            applyResult(reorderTasks(doc, card.id, ids), row);
+          };
+          const up = document.createElement("button");
+          up.type = "button";
+          up.className = "mini-action";
+          up.textContent = "↑";
+          up.title = "Move up";
+          up.disabled = blocked || index === 0;
+          up.addEventListener("click", () => moveTo(index - 1));
+          const down = document.createElement("button");
+          down.type = "button";
+          down.className = "mini-action";
+          down.textContent = "↓";
+          down.title = "Move down";
+          down.disabled = blocked || index === card.tasks.length - 1;
+          down.addEventListener("click", () => moveTo(index + 1));
+          row.append(up, down);
+        }
 
         const removeTask = document.createElement("button");
         removeTask.type = "button";
@@ -1227,6 +1275,30 @@
         input.addEventListener("blur", cancel);
       }
 
+      /** Swap a card's title for an input; Enter renames, Escape or blur cancels. */
+      function startRenameCard(titleEl, card, container, afterNode) {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.value = card.title;
+        titleEl.replaceWith(input);
+        input.focus();
+        input.select();
+
+        const cancel = () => {
+          input.replaceWith(titleEl);
+          clearError(container);
+        };
+        input.addEventListener("input", () => clearError(container));
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            if (input.value.trim() === "") return;
+            applyResult(renameCard(doc, card.id, input.value), container, afterNode);
+          }
+          if (event.key === "Escape") cancel();
+        });
+        input.addEventListener("blur", cancel);
+      }
+
       function appendSubTaskForm(li, cardId, parentId) {
         const form = document.createElement("div");
         form.className = "sub-form";
@@ -1253,7 +1325,8 @@
         input.focus();
       }
 
-      document.getElementById("add-card").addEventListener("click", () => {
+      // Card entry gets the same fast path as task entry: type, then Enter.
+      const submitCard = () => {
         const title = newCardInput.value;
         if (title.trim() === "") return;
         const result = addCard(doc, title);
@@ -1261,6 +1334,10 @@
           commit(result.value);
           newCardInput.value = "";
         }
+      };
+      document.getElementById("add-card").addEventListener("click", submitCard);
+      newCardInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") submitCard();
       });
 
       document.getElementById("export").addEventListener("click", () => {
