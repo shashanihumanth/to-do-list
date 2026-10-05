@@ -205,17 +205,24 @@ export function reorderTasks(doc: Document, cardId: string, orderedIds: readonly
   if (cardIndex === -1) return fail("card-not-found");
   if (isCardBlocked(doc, cardId)) return fail("card-blocked");
   const card = doc.cards[cardIndex]!;
-
-  const byId = new Map(card.tasks.map((t) => [t.id, t]));
-  if (
-    orderedIds.length !== card.tasks.length ||
-    new Set(orderedIds).size !== orderedIds.length ||
-    orderedIds.some((id) => !byId.has(id))
-  ) {
-    return fail("invalid-reorder");
-  }
-  const tasks = orderedIds.map((id) => byId.get(id)!);
+  const tasks = reorderById(card.tasks, orderedIds);
+  if (tasks === null) return fail("invalid-reorder");
   return ok(replaceCard(doc, cardIndex, { ...card, tasks }));
+}
+
+/** Reorder the sub-tasks under a task, with the same permutation rules as `reorderTasks`. */
+export function reorderSubTasks(doc: Document, taskId: string, orderedIds: readonly string[]): Result<Document> {
+  for (let i = 0; i < doc.cards.length; i++) {
+    const card = doc.cards[i]!;
+    const located = locateTask(card.tasks, taskId);
+    if (located === null) continue;
+    if (isCardBlocked(doc, card.id)) return fail("card-blocked");
+    const subtasks = reorderById(located.task.subtasks, orderedIds);
+    if (subtasks === null) return fail("invalid-reorder");
+    const tasks = updateTask(card.tasks, taskId, (t) => ({ ...t, subtasks }));
+    return ok(replaceCard(doc, i, { ...card, tasks: tasks ?? card.tasks }));
+  }
+  return fail("task-not-found");
 }
 
 // ---------------------------------------------------------------------------
@@ -332,12 +339,54 @@ export function blockedSet(doc: Document): ReadonlySet<string> {
 }
 
 // ---------------------------------------------------------------------------
+// Invariant checks (storage re-validates an imported document against these)
+
+/** True when any two siblings under the same parent share a normalized title. */
+export function hasDuplicateSiblings(doc: Document): boolean {
+  const check = (tasks: readonly Task[]): boolean => {
+    const seen = new Set<string>();
+    for (const task of tasks) {
+      const norm = normalizeTitle(task.title);
+      if (seen.has(norm)) return true;
+      seen.add(norm);
+      if (check(task.subtasks)) return true;
+    }
+    return false;
+  };
+  return doc.cards.some((card) => check(card.tasks));
+}
+
+/** True when the edge set contains a cycle, including a self-loop. */
+export function hasCycle(doc: Document): boolean {
+  const ids = new Set(doc.cards.map((c) => c.id));
+  for (const edge of doc.edges) {
+    if (edge.prerequisiteId === edge.dependentId) return true;
+    if (!ids.has(edge.prerequisiteId) || !ids.has(edge.dependentId)) continue;
+    if (reaches(doc, edge.dependentId, edge.prerequisiteId)) return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 
 /** True when a sibling already uses this normalized title (optionally excluding one id). */
 export function hasDuplicateSibling(siblings: readonly Task[], title: string, excludeId?: string): boolean {
   const norm = normalizeTitle(title);
   return siblings.some((s) => s.id !== excludeId && normalizeTitle(s.title) === norm);
+}
+
+/** Reorder items to match `orderedIds` — a permutation of their ids — or null if not. */
+function reorderById<T extends { readonly id: string }>(items: readonly T[], orderedIds: readonly string[]): T[] | null {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  if (
+    orderedIds.length !== items.length ||
+    new Set(orderedIds).size !== orderedIds.length ||
+    orderedIds.some((id) => !byId.has(id))
+  ) {
+    return null;
+  }
+  return orderedIds.map((id) => byId.get(id)!);
 }
 
 interface Located {

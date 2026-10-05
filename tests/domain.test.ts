@@ -8,7 +8,9 @@ import {
   createDocument,
   deleteCard,
   deleteTask,
+  hasCycle,
   hasDuplicateSibling,
+  hasDuplicateSiblings,
   isCardBlocked,
   isCardComplete,
   isTaskComplete,
@@ -17,6 +19,7 @@ import {
   renameCard,
   renameTask,
   reorderTasks,
+  reorderSubTasks,
   toggleTaskComplete,
   topologicalOrder,
   type Card,
@@ -308,6 +311,130 @@ describe("reorderTasks", () => {
     const one = d.cards[0]!.tasks[0]!.id;
     d = valueOf(addTask(d, cardId, "Two"));
     expect(reorderTasks(d, cardId, [one, one])).toEqual({ ok: false, error: "invalid-reorder" });
+  });
+});
+
+describe("reorderSubTasks", () => {
+  it("reorders the sub-tasks under a task", () => {
+    const { doc, cardId } = docWithCard();
+    let d = valueOf(addTask(doc, cardId, "Parent"));
+    const parent = d.cards[0]!.tasks[0]!.id;
+    d = valueOf(addTask(d, cardId, "One", parent));
+    const one = d.cards[0]!.tasks[0]!.subtasks[0]!.id;
+    d = valueOf(addTask(d, cardId, "Two", parent));
+    const two = d.cards[0]!.tasks[0]!.subtasks[1]!.id;
+    const reordered = valueOf(reorderSubTasks(d, parent, [two, one]));
+    expect(reordered.cards[0]!.tasks[0]!.subtasks.map((t) => t.id)).toEqual([two, one]);
+  });
+
+  it("rejects ids that don't match the task's sub-tasks", () => {
+    const { doc, cardId } = docWithCard();
+    let d = valueOf(addTask(doc, cardId, "Parent"));
+    const parent = d.cards[0]!.tasks[0]!.id;
+    d = valueOf(addTask(d, cardId, "One", parent));
+    expect(reorderSubTasks(d, parent, ["missing"])).toEqual({ ok: false, error: "invalid-reorder" });
+  });
+
+  it("rejects an unknown task id", () => {
+    const { doc } = docWithCard();
+    expect(reorderSubTasks(doc, "nope", ["x"])).toEqual({ ok: false, error: "task-not-found" });
+  });
+
+  it("rejects reordering sub-tasks of a blocked card", () => {
+    let doc = valueOf(addCard(createDocument(), "A"));
+    const a = doc.cards[0]!.id;
+    doc = valueOf(addCard(doc, "B"));
+    const b = doc.cards[1]!.id;
+    doc = valueOf(addTask(doc, b, "Parent"));
+    const parent = doc.cards[1]!.tasks[0]!.id;
+    doc = valueOf(addTask(doc, b, "One", parent));
+    const one = doc.cards[1]!.tasks[0]!.subtasks[0]!.id;
+    doc = valueOf(addTask(doc, b, "Two", parent));
+    const two = doc.cards[1]!.tasks[0]!.subtasks[1]!.id;
+    doc = valueOf(addEdge(doc, a, b));
+    expect(reorderSubTasks(doc, parent, [two, one])).toEqual({ ok: false, error: "card-blocked" });
+  });
+});
+
+describe("hasCycle", () => {
+  const card = (id: string, order: number): Card => ({ id, title: id, tasks: [], order });
+
+  it("is false for an acyclic document", () => {
+    expect(hasCycle(createDocument())).toBe(false);
+  });
+
+  it("detects a self-loop", () => {
+    const doc: Document = {
+      version: 1,
+      cards: [card("a", 0)],
+      edges: [{ prerequisiteId: "a", dependentId: "a" }],
+    };
+    expect(hasCycle(doc)).toBe(true);
+  });
+
+  it("detects a two-card cycle", () => {
+    const doc: Document = {
+      version: 1,
+      cards: [card("a", 0), card("b", 1)],
+      edges: [
+        { prerequisiteId: "a", dependentId: "b" },
+        { prerequisiteId: "b", dependentId: "a" },
+      ],
+    };
+    expect(hasCycle(doc)).toBe(true);
+  });
+
+  it("is false for a simple acyclic chain", () => {
+    const doc: Document = {
+      version: 1,
+      cards: [card("a", 0), card("b", 1)],
+      edges: [{ prerequisiteId: "a", dependentId: "b" }],
+    };
+    expect(hasCycle(doc)).toBe(false);
+  });
+});
+
+describe("hasDuplicateSiblings", () => {
+  const task = (id: string, title: string, subtasks: Task[] = []): Task => ({ id, title, completed: false, subtasks });
+
+  it("is false for an empty document", () => {
+    expect(hasDuplicateSiblings(createDocument())).toBe(false);
+  });
+
+  it("detects duplicate sibling tasks, case-insensitively", () => {
+    const doc: Document = {
+      version: 1,
+      edges: [],
+      cards: [{ id: "c", title: "C", order: 0, tasks: [task("1", "Buy milk"), task("2", "buy milk")] }],
+    };
+    expect(hasDuplicateSiblings(doc)).toBe(true);
+  });
+
+  it("allows the same title under different parents", () => {
+    const doc: Document = {
+      version: 1,
+      edges: [],
+      cards: [
+        { id: "c", title: "C", order: 0, tasks: [
+          task("p1", "Plan party", [task("s1", "Buy cake")]),
+          task("p2", "Plan dinner", [task("s2", "Buy cake")]),
+        ] },
+      ],
+    };
+    expect(hasDuplicateSiblings(doc)).toBe(false);
+  });
+
+  it("detects duplicate sub-tasks under the same parent", () => {
+    const doc: Document = {
+      version: 1,
+      edges: [],
+      cards: [
+        { id: "c", title: "C", order: 0, tasks: [
+          task("p", "Plan", [task("s1", "Buy cake"), task("s2", "buy cake")]),
+        ] },
+      ],
+    };
+    expect(hasDuplicateSiblings(doc)).toBe(true);
   });
 });
 

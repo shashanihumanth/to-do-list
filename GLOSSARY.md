@@ -4,6 +4,10 @@ A card-based to-do app: cards group tasks and link into a dependency graph; a pa
 
 ## Language
 
+**Document**
+The versioned whole — every card and edge together — that is persisted, exported, and imported. User-facing copy calls it the "board".
+_Avoid_: state, store, model
+
 **Card**
 A top-level container that groups related tasks and links to other cards in the dependency graph.
 _Avoid_: list, board, note
@@ -15,6 +19,10 @@ _Avoid_: item, entry, todo
 **Sub-task**
 A task nested under another task. "Sub-task" names the relationship, not a distinct type — a sub-task is still a task.
 _Avoid_: child task, check item
+
+**Leaf task**
+A task with no sub-tasks. A leaf task is completed directly; a task with sub-tasks completes only when they all do.
+_Avoid_: terminal task, atomic task
 
 **Complete**
 The sole completion state of a task or card. A task is complete only when its sub-tasks are; a card is complete only when its tasks are.

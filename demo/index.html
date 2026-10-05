@@ -418,6 +418,7 @@
         renameCard,
         renameTask,
         reorderTasks,
+        reorderSubTasks,
         toggleTaskComplete,
         topologicalOrder,
       } from "../dist/domain.js";
@@ -1072,7 +1073,13 @@
         const list = document.createElement("ul");
         list.className = "tasks";
         for (const [index, task] of card.tasks.entries()) {
-          list.appendChild(renderTask(task, card.id, blocked, cues, { card, index }));
+          list.appendChild(
+            renderTask(task, card.id, blocked, cues, {
+              siblings: card.tasks,
+              index,
+              reorder: (ids) => reorderTasks(doc, card.id, ids),
+            }),
+          );
         }
         el.appendChild(list);
 
@@ -1200,14 +1207,14 @@
         renameButton.addEventListener("click", () => startRename(label, task));
         row.appendChild(renameButton);
 
-        // Reordering is a card-level command, so it is offered only on a card's
-        // own tasks — and only when there is more than one to order.
-        if (position !== undefined && position.card.tasks.length > 1) {
-          const { card, index } = position;
+        // Reordering is offered on any list of siblings with more than one item,
+        // through the parent's reorder command (card-level or sub-task-level).
+        if (position !== undefined && position.siblings.length > 1) {
+          const { siblings, index, reorder } = position;
           const moveTo = (target) => {
-            const ids = card.tasks.map((t) => t.id);
+            const ids = siblings.map((t) => t.id);
             [ids[index], ids[target]] = [ids[target], ids[index]];
-            applyResult(reorderTasks(doc, card.id, ids), row);
+            applyResult(reorder(ids), row);
           };
           const up = document.createElement("button");
           up.type = "button";
@@ -1221,7 +1228,7 @@
           down.className = "mini-action";
           down.textContent = "↓";
           down.title = "Move down";
-          down.disabled = blocked || index === card.tasks.length - 1;
+          down.disabled = blocked || index === siblings.length - 1;
           down.addEventListener("click", () => moveTo(index + 1));
           row.append(up, down);
         }
@@ -1242,7 +1249,15 @@
         if (task.subtasks.length > 0) {
           const children = document.createElement("ul");
           children.className = "tasks";
-          for (const child of task.subtasks) children.appendChild(renderTask(child, cardId, blocked, cues));
+          for (const [childIndex, child] of task.subtasks.entries()) {
+            children.appendChild(
+              renderTask(child, cardId, blocked, cues, {
+                siblings: task.subtasks,
+                index: childIndex,
+                reorder: (ids) => reorderSubTasks(doc, task.id, ids),
+              }),
+            );
+          }
           li.appendChild(children);
         }
 
