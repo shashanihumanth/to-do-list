@@ -256,6 +256,82 @@ export function isCardBlocked(doc: Document, cardId: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// View helpers
+
+/**
+ * The card ids in flow order: every prerequisite before the card that waits on
+ * it.
+ *
+ * Among cards that are ready at the same time, the one earliest in the document
+ * comes first, so an unlinked document keeps its own order. Cycle rejection
+ * makes a loop impossible; should one somehow arrive anyway, its cards still
+ * appear — after the acyclic ones, in document order — so no node can vanish
+ * from a view.
+ */
+export function topologicalOrder(doc: Document): readonly string[] {
+  const byOrder = [...doc.cards].sort((a, b) => a.order - b.order);
+  const waitingOn = new Map<string, number>(doc.cards.map((c) => [c.id, 0]));
+  const dependents = new Map<string, string[]>(doc.cards.map((c) => [c.id, []]));
+  for (const edge of doc.edges) {
+    if (!waitingOn.has(edge.prerequisiteId) || !waitingOn.has(edge.dependentId)) continue;
+    waitingOn.set(edge.dependentId, waitingOn.get(edge.dependentId)! + 1);
+    dependents.get(edge.prerequisiteId)!.push(edge.dependentId);
+  }
+
+  const order: string[] = [];
+  const placed = new Set<string>();
+  while (placed.size < doc.cards.length) {
+    const ready = byOrder.find((c) => !placed.has(c.id) && waitingOn.get(c.id) === 0);
+    // Only a cycle can leave nothing ready; fall back to document order so the
+    // function stays total.
+    const next = ready ?? byOrder.find((c) => !placed.has(c.id));
+    if (next === undefined) break;
+    placed.add(next.id);
+    order.push(next.id);
+    for (const dependent of dependents.get(next.id)!) {
+      waitingOn.set(dependent, waitingOn.get(dependent)! - 1);
+    }
+  }
+  return order;
+}
+
+/**
+ * The ids of every blocked card: exactly the cards an incomplete card can reach
+ * along edges, in one pass over the graph.
+ *
+ * This is the batch form of `isCardBlocked` for a whole view — same answer,
+ * without asking per card. That includes a prerequisite id that names no card
+ * (a malformed document, which an imported file could carry): it can never
+ * complete, so it blocks, exactly as `isCardBlocked` reads it.
+ */
+export function blockedSet(doc: Document): ReadonlySet<string> {
+  const known = new Set(doc.cards.map((c) => c.id));
+  const dependents = new Map<string, string[]>(doc.cards.map((c) => [c.id, []]));
+  const blocked = new Set<string>();
+  const queue = doc.cards.filter((c) => !isCardComplete(c)).map((c) => c.id);
+
+  for (const edge of doc.edges) {
+    if (!known.has(edge.dependentId)) continue;
+    if (!known.has(edge.prerequisiteId)) {
+      if (blocked.has(edge.dependentId)) continue;
+      blocked.add(edge.dependentId);
+      queue.push(edge.dependentId);
+      continue;
+    }
+    dependents.get(edge.prerequisiteId)!.push(edge.dependentId);
+  }
+
+  while (queue.length > 0) {
+    for (const dependent of dependents.get(queue.pop()!) ?? []) {
+      if (blocked.has(dependent)) continue;
+      blocked.add(dependent);
+      queue.push(dependent);
+    }
+  }
+  return blocked;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 
 /** True when a sibling already uses this normalized title (optionally excluding one id). */
