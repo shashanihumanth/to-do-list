@@ -21,7 +21,7 @@ The sole completion state of a task or card. A task is complete only when its su
 _Avoid_: done, finished, resolved
 
 **Normalized title**
-The canonical form of a task title — whitespace trimmed, case folded, Unicode NFC — used as the duplicate key within a card.
+The canonical form of a task title — whitespace trimmed, case folded, Unicode NFC — used as the duplicate key among sibling tasks (tasks under the same parent).
 _Avoid_: canonical title, slug
 
 **Edge**
