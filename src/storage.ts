@@ -7,10 +7,10 @@
  * writing storage is the adapter's job, not the domain's.
  */
 
-import type { Card, Document, Edge, Result, Task } from "./domain.js";
+import { hasCycle, hasDuplicateSiblings, type Card, type Document, type Edge, type Result, type Task } from "./domain.js";
 
 /** Reasons JSON text cannot be read back as a document. */
-export type DocumentError = "invalid-json" | "unsupported-version" | "malformed-document";
+export type DocumentError = "invalid-json" | "unsupported-version" | "malformed-document" | "invalid-document";
 
 const fail = (error: DocumentError): Result<Document, DocumentError> => ({ ok: false, error });
 
@@ -57,9 +57,10 @@ export function serializeDocument(doc: Document): string {
  * shape does not match the model are all rejected, so an import cannot put a
  * structure the board would render blindly on screen.
  *
- * Graph invariants are not re-checked here: the app's own export is written
- * from a valid document, and the queries stay total over a malformed one — a
- * prerequisite id that names no card already has a defined reading.
+ * The stored invariants — acyclic edges and unique sibling titles — are
+ * re-checked too, so an imported board cannot carry a shape the domain itself
+ * would never produce. Completion and blocking are derived, not stored, so a
+ * document cannot violate them.
  */
 export function deserializeDocument(text: string): Result<Document, DocumentError> {
   let value: unknown;
@@ -77,5 +78,8 @@ export function deserializeDocument(text: string): Result<Document, DocumentErro
   if (!isArrayOf(cards, isCard)) return fail("malformed-document");
   if (!isArrayOf(edges, isEdge)) return fail("malformed-document");
 
-  return { ok: true, value: { version: 1, cards, edges } };
+  const doc: Document = { version: 1, cards, edges };
+  if (hasCycle(doc) || hasDuplicateSiblings(doc)) return fail("invalid-document");
+
+  return { ok: true, value: doc };
 }

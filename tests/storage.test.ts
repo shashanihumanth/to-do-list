@@ -83,3 +83,43 @@ describe("deserializeDocument rejects a malformed document", () => {
     });
   }
 });
+
+describe("deserializeDocument rejects a document that violates a stored invariant", () => {
+  const cardA = { id: "a", title: "A", tasks: [], order: 0 };
+  const cardB = { id: "b", title: "B", tasks: [], order: 1 };
+
+  it("rejects a cyclic document", () => {
+    const cyclic = JSON.stringify({
+      version: 1,
+      cards: [cardA, cardB],
+      edges: [
+        { prerequisiteId: "a", dependentId: "b" },
+        { prerequisiteId: "b", dependentId: "a" },
+      ],
+    });
+    expect(deserializeDocument(cyclic)).toEqual({ ok: false, error: "invalid-document" });
+  });
+
+  it("rejects a self-loop", () => {
+    const selfLoop = JSON.stringify({
+      version: 1,
+      cards: [cardA],
+      edges: [{ prerequisiteId: "a", dependentId: "a" }],
+    });
+    expect(deserializeDocument(selfLoop)).toEqual({ ok: false, error: "invalid-document" });
+  });
+
+  it("rejects duplicate sibling titles", () => {
+    const dup = JSON.stringify({
+      version: 1,
+      cards: [
+        { id: "c", title: "C", order: 0, tasks: [
+          { id: "1", title: "Buy milk", completed: false, subtasks: [] },
+          { id: "2", title: "buy milk", completed: false, subtasks: [] },
+        ] },
+      ],
+      edges: [],
+    });
+    expect(deserializeDocument(dup)).toEqual({ ok: false, error: "invalid-document" });
+  });
+});
