@@ -17,6 +17,13 @@
   system preference, Light and Dark are remembered across reloads, and the
   choice is applied before the first paint so the wrong theme never flashes.
 
+  Motion is frequency-gated. Adding, completing and deleting a task or card
+  happen tens of times a day, so they get the quick budget and read as
+  confirmation; connecting cards, a card unblocking and the theme toggle are
+  occasional and get the standard budget. Only the nodes a commit actually
+  changed move, a keyboard-initiated action never animates, and reduced motion
+  keeps the fades while dropping the movement.
+
   Build once, then serve the repo root (ES modules need HTTP, not file://):
 
       npx tsc               # emits dist/domain.js and dist/storage.js
@@ -98,6 +105,10 @@
         --danger-line: #b67469;
         --chip: #f1ece5;
         --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+        /* Motion is frequency-gated: actions taken tens of times a day get the
+           quick budget, the occasional ones the standard one. */
+        --dur-quick: 140ms;
+        --dur-standard: 220ms;
         --dur-view: 180ms;
       }
       :root[data-theme="dark"] {
@@ -201,6 +212,51 @@
         }
         .view.active { transition: opacity 120ms ease, visibility 0s; }
       }
+      /*
+        Motion, frequency-gated per the spec. Adding, completing and deleting a
+        task or card happen tens of times a day, so they get the quick budget and
+        read as confirmation rather than decoration; connecting cards, a card
+        unblocking and the theme toggle are occasional and get the standard one
+        (the view toggle keeps the 180ms it shipped with). Only opacity and
+        transform move — except the edge reveal, where a line draws along its own
+        length and has no transform equivalent.
+
+        The cues are classes added to the nodes a commit actually changed, so a
+        rebuild that changed nothing moves nothing; a keyboard-initiated action
+        adds none of them and lands instantly.
+      */
+      @keyframes enter {
+        from { opacity: 0; transform: translateY(8px); }
+      }
+      @keyframes settle {
+        from { opacity: 0.55; transform: translateY(2px); }
+      }
+      @keyframes unblock {
+        from { opacity: 0.4; transform: translateY(6px); }
+      }
+      @keyframes enter-fade { from { opacity: 0; } }
+      @keyframes settle-fade { from { opacity: 0.55; } }
+      @keyframes unblock-fade { from { opacity: 0.4; } }
+      /* `backwards` holds the from-state through the stagger delay and nothing
+         after the run: the element's own style is already the end state. */
+      .anim-enter { animation: enter var(--dur-quick) var(--ease-out) var(--enter-delay, 0ms) backwards; }
+      .anim-settle { animation: settle var(--dur-quick) var(--ease-out) backwards; }
+      .anim-unblock { animation: unblock var(--dur-standard) var(--ease-out) backwards; }
+      /* Reduced motion keeps the fade that says "something changed" and drops
+         the movement. Only the name is swapped, so the budget and the stagger
+         cannot drift from the rule above. */
+      @media (prefers-reduced-motion: reduce) {
+        .anim-enter { animation-name: enter-fade; }
+        .anim-settle { animation-name: settle-fade; }
+        .anim-unblock { animation-name: unblock-fade; }
+      }
+      /* The theme swap is a data-attribute flip, not a property to interpolate,
+         so its crossfade is the browser's own snapshot transition. */
+      ::view-transition-old(root),
+      ::view-transition-new(root) {
+        animation-duration: var(--dur-standard);
+        animation-timing-function: var(--ease-out);
+      }
       .view-note { margin: 0; color: var(--muted); font-size: 0.85rem; }
       .flow { display: block; max-width: 100%; height: auto; }
       .node rect { fill: var(--card); stroke: var(--line); stroke-width: 1.5; }
@@ -250,7 +306,8 @@
         margin-left: 0.4rem;
         border-left: 1px solid var(--line);
       }
-      .add-sub {
+      /* The file's small secondary-action button: "+ sub", "rename", "delete". */
+      .mini-action {
         font-size: 0.72rem;
         padding: 0.1rem 0.45rem;
         background: transparent;
@@ -258,7 +315,11 @@
         border: 1px solid var(--line);
         border-radius: 6px;
       }
-      .add-sub:hover { color: var(--ink); }
+      /* Pointer-gated: on a touch screen :hover fires on tap and the label
+         would flash on the way to the click. */
+      @media (hover: hover) and (pointer: fine) {
+        .mini-action:hover { color: var(--ink); }
+      }
       .sub-form { display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 0.3rem 0 0.3rem 1.5rem; }
       .sub-form input { flex: 1; }
       .error {
@@ -348,6 +409,8 @@
         addTask,
         blockedSet,
         createDocument,
+        deleteCard,
+        deleteTask,
         isCardBlocked,
         isCardComplete,
         isTaskComplete,
@@ -364,6 +427,25 @@
       const viewStack = document.getElementById("view-stack");
       const toolbar = document.getElementById("board-toolbar");
       const importFile = document.getElementById("import-file");
+
+      /**
+       * Keyboard-initiated actions get no animation at all — the spec makes that
+       * a disqualifier, not a judgment call. The last input modality decides,
+       * because a checkbox's `change` event carries no pointer detail of its own.
+       */
+      let keyboardInitiated = false;
+      document.addEventListener("keydown", () => { keyboardInitiated = true; }, true);
+      document.addEventListener("pointerdown", () => { keyboardInitiated = false; }, true);
+      const motionAllowed = () => !keyboardInitiated;
+
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+      /** A motion token, so the script's half uses the same curve and budgets as the CSS half. */
+      const motionToken = (name) =>
+        getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      const EASE_OUT = motionToken("--ease-out");
+      const QUICK_MS = Number.parseFloat(motionToken("--dur-quick"));
+      const STANDARD_MS = Number.parseFloat(motionToken("--dur-standard"));
 
       /**
        * The storage adapter: the only place browser storage is touched. The
@@ -397,13 +479,32 @@
 
       const restored = loadDocument();
       let doc = restored.doc;
+      /** The document the DOM was last rendered from — the yardstick for "what changed". */
+      let rendered = doc;
 
-      /** Adopt a new document: the one write path — drop any stale notice, persist, re-render. */
-      function commit(next) {
+      /** Adopt `next` as the document and persist it; the caller decides when to render. */
+      function adopt(next) {
         doc = next;
         clearError(toolbar);
         saveDocument();
-        render();
+      }
+
+      /**
+       * Re-render against the last rendered state, so motion lands on everything
+       * that changed since the DOM was last built — including a change whose own
+       * render was held back for an exit. A keyboard-initiated action moves nothing.
+       */
+      function renderNow(animate) {
+        const cues = animate && motionAllowed() ? changesBetween(rendered, doc) : null;
+        rendered = doc;
+        render(cues);
+      }
+
+      /** Adopt a new document and re-render: the one write path. */
+      function commit(next, animate = true) {
+        flushExit();
+        adopt(next);
+        renderNow(animate);
       }
 
       const VIEWS = [
@@ -411,6 +512,8 @@
         { name: "list", el: document.getElementById("view-list"), button: document.getElementById("view-list-btn") },
       ];
       let view = "graph";
+      /** Edges that entered while the graph was hidden, waiting to be drawn. */
+      let undrawnEdges = new Set();
 
       /**
        * Show one view and hide the other. The two crossfade; a toggle from the
@@ -429,13 +532,17 @@
           void viewStack.offsetWidth; // let the swap settle before transitions return
           viewStack.classList.remove("instant");
         }
+        // An edge held while the graph was hidden draws now — unless the switch
+        // itself was keyboard-initiated, in which case it is already in place.
+        if (name === "graph" && undrawnEdges.size > 0) {
+          const edges = undrawnEdges;
+          undrawnEdges = new Set();
+          if (animate) renderGraph(edgeCues(edges));
+        }
       }
 
       for (const entry of VIEWS) {
-        entry.button.addEventListener("click", (event) => {
-          // A click synthesised by Enter/Space has detail 0 — that's the keyboard.
-          setView(entry.name, event.detail !== 0);
-        });
+        entry.button.addEventListener("click", () => setView(entry.name, motionAllowed()));
       }
 
       // The rule and the storage key live in the <head> bootstrap (window.__theme),
@@ -463,13 +570,20 @@
       }
 
       /** Choose a theme and remember it; Auto clears the saved choice. */
-      function setTheme(preference) {
+      function setTheme(preference, animate = true) {
+        if (preference === themePreference) return; // re-picking the active theme is a no-op
         themePreference = preference;
         try {
           if (preference === "system") localStorage.removeItem(themeRule.key);
           else localStorage.setItem(themeRule.key, preference);
         } catch {
           showError(toolbar, "This browser would not remember the theme choice.");
+        }
+        // The swap is a data-attribute flip, so its crossfade is the browser's
+        // snapshot transition. A keyboard choice and reduced motion swap instantly.
+        if (animate && motionAllowed() && !reduceMotion.matches && document.startViewTransition) {
+          document.startViewTransition(applyTheme);
+          return;
         }
         applyTheme();
       }
@@ -536,10 +650,125 @@
         showRejection(container, result, afterNode);
       }
 
+      /**
+       * A removal adopts the deletion at once — state and storage never wait on a
+       * frame — and holds back only the re-render, so the row can leave first. Any
+       * other commit cuts the exit short and renders at once, so a row that is
+       * already deleted cannot linger, and a reload mid-exit cannot resurrect it.
+       */
+      let exiting = null;
+
+      /** Cut an in-flight exit short; the render that follows removes its row anyway. */
+      function flushExit() {
+        if (exiting === null) return;
+        exiting.cancel();
+        exiting = null;
+      }
+
+      /** Apply a removal: on success the row leaves first — unless it must not move. */
+      function scheduleRemoval(apply, container, node) {
+        const result = apply(doc);
+        if (!result.ok) {
+          showRejection(container, result);
+          return;
+        }
+        adopt(result.value);
+        if (!motionAllowed()) {
+          renderNow(false);
+          return;
+        }
+        const frames = reduceMotion.matches
+          ? [{ opacity: 1 }, { opacity: 0 }]
+          : [
+              { opacity: 1, transform: "translateY(0)" },
+              { opacity: 0, transform: "translateY(8px)" },
+            ];
+        const animation = node.animate(frames, {
+          duration: QUICK_MS,
+          easing: EASE_OUT,
+          fill: "forwards",
+        });
+        node.style.pointerEvents = "none"; // the row is leaving; nothing on it should fire again
+        exiting = animation;
+        animation.finished.then(() => {
+          if (exiting !== animation) return;
+          exiting = null;
+          renderNow(true);
+        }, () => {});
+      }
+
+      /** Every task in a document, by id — the unit a change is measured in. */
+      function tasksById(source) {
+        const byId = new Map();
+        const walk = (tasks) => {
+          for (const task of tasks) {
+            byId.set(task.id, task);
+            walk(task.subtasks);
+          }
+        };
+        for (const card of source.cards) walk(card.tasks);
+        return byId;
+      }
+
+      /** The identity of an edge, which has no id of its own. */
+      const edgeKey = (edge) => `${edge.prerequisiteId}->${edge.dependentId}`;
+
+      /** A cue set carrying nothing but the given new edges. */
+      const edgeCues = (edges) => ({ entering: new Set(), toggled: new Set(), unblocked: new Set(), edges });
+
+      /**
+       * What changed between two documents, by id: the only nodes that may move.
+       * Every render rebuilds both views, so without this each rebuild would
+       * replay every entrance; with it, motion lands on the change alone.
+       */
+      function changesBetween(before, after) {
+        const beforeCards = new Set(before.cards.map((card) => card.id));
+        const beforeTasks = tasksById(before);
+        const beforeEdges = new Set(before.edges.map(edgeKey));
+        const wasBlocked = blockedSet(before);
+        const isBlocked = blockedSet(after);
+
+        const entering = new Set();
+        for (const card of after.cards) {
+          if (!beforeCards.has(card.id)) entering.add(card.id);
+        }
+        const toggled = new Set();
+        for (const [id, task] of tasksById(after)) {
+          const previous = beforeTasks.get(id);
+          if (previous === undefined) entering.add(id);
+          // Either direction: the spec gives complete and uncomplete the same
+          // near-imperceptible feedback.
+          else if (isTaskComplete(previous) !== isTaskComplete(task)) toggled.add(id);
+        }
+        const unblocked = new Set();
+        for (const card of after.cards) {
+          if (beforeCards.has(card.id) && wasBlocked.has(card.id) && !isBlocked.has(card.id)) {
+            unblocked.add(card.id);
+          }
+        }
+        const edges = new Set();
+        for (const edge of after.edges) {
+          const key = edgeKey(edge);
+          if (!beforeEdges.has(key)) edges.add(key);
+        }
+        return { entering, toggled, unblocked, edges };
+      }
+
+      /** 45ms between entering siblings, capped so a large import doesn't crawl. */
+      const staggerDelay = (index) => Math.min(index, 5) * 45;
+      let enterStep = 0;
+      const nextEnterDelay = () => staggerDelay(enterStep++);
+
+      /** Mark a node as entering, at its place in the stagger. */
+      function markEntering(el) {
+        el.classList.add("anim-enter");
+        el.style.setProperty("--enter-delay", `${nextEnterDelay()}ms`);
+      }
+
       /** Render both views; the toggle only decides which one is visible. */
-      function render() {
-        renderList();
-        renderGraph();
+      function render(cues) {
+        renderList(cues);
+        renderGraph(cues);
       }
 
       function emptyMessage() {
@@ -550,7 +779,8 @@
       }
 
       /** The outline: every card in flow order, each with its tasks indented. */
-      function renderList() {
+      function renderList(cues) {
+        enterStep = 0;
         cardsEl.replaceChildren();
         if (doc.cards.length === 0) {
           cardsEl.appendChild(emptyMessage());
@@ -565,7 +795,7 @@
         const byId = new Map(doc.cards.map((c) => [c.id, c]));
         for (const id of topologicalOrder(doc)) {
           const card = byId.get(id);
-          if (card !== undefined) cardsEl.appendChild(renderCard(card));
+          if (card !== undefined) cardsEl.appendChild(renderCard(card, cues));
         }
       }
 
@@ -582,7 +812,8 @@
        * sit in layers, a card one column right of its latest prerequisite, so
        * every edge points forwards.
        */
-      function renderGraph() {
+      function renderGraph(cues) {
+        enterStep = 0;
         graphEl.replaceChildren();
         if (doc.cards.length === 0) {
           graphEl.appendChild(emptyMessage());
@@ -622,16 +853,33 @@
         svg.setAttribute("aria-label", `Flow chart: ${doc.cards.length} cards, ${doc.edges.length} edges`);
         svg.appendChild(edgeMarker());
 
+        const drawing = [];
         for (const edge of doc.edges) {
           const path = edgePath(edge, layerOf, rowOf);
-          if (path !== null) svg.appendChild(path);
+          if (path === null) continue;
+          svg.appendChild(path);
+          const key = edgeKey(edge);
+          if (cues !== null && cues.edges.has(key)) drawing.push({ path, key });
         }
         for (const id of ids) {
           const card = byId.get(id);
-          if (card !== undefined) svg.appendChild(graphNode(card, layerOf.get(id), rowOf.get(id), blocked.has(id)));
+          if (card === undefined) continue;
+          const entering = cues !== null && cues.entering.has(id);
+          svg.appendChild(graphNode(card, layerOf.get(id), rowOf.get(id), blocked.has(id), entering));
         }
 
         graphEl.appendChild(svg);
+        // Drawn after insertion: a path must be in the document to be measured.
+        // Connecting happens in the list view, so an edge that enters while the
+        // graph is hidden is held back until the graph is looked at. The lengths
+        // are all read before any style is written, so one recalculation covers
+        // the batch instead of one per edge.
+        if (view === "graph") {
+          const lengths = drawing.map(({ path }) => path.getTotalLength());
+          drawing.forEach(({ path }, index) => drawEdge(path, lengths[index], staggerDelay(index)));
+        } else {
+          for (const { key } of drawing) undrawnEdges.add(key);
+        }
       }
 
       /** The marker every edge ends in. */
@@ -669,8 +917,38 @@
         return path;
       }
 
+      /**
+       * Draw a new edge in: the line reveals along its own length. A line has no
+       * transform that reads as "drawing", so this is the one paint property in
+       * the file — dash offset, which costs no layout. Reduced motion swaps the
+       * reveal for a fade.
+       */
+      function drawEdge(path, length, delay) {
+        if (reduceMotion.matches) {
+          path.animate([{ opacity: 0 }, { opacity: 1 }], {
+            duration: QUICK_MS,
+            delay,
+            easing: EASE_OUT,
+          });
+          return;
+        }
+        path.style.strokeDasharray = String(length);
+        path.style.strokeDashoffset = String(length);
+        const draw = path.animate(
+          [{ strokeDashoffset: String(length) }, { strokeDashoffset: "0" }],
+          { duration: STANDARD_MS, delay, easing: EASE_OUT },
+        );
+        // Restore the undashed line whether the draw lands or is cut short — a
+        // cancelled draw would otherwise leave the edge dashed out of sight.
+        const restore = () => {
+          path.style.strokeDasharray = "";
+          path.style.strokeDashoffset = "";
+        };
+        draw.finished.then(restore, restore);
+      }
+
       /** One card as a node: title and progress, styled by its derived state. */
-      function graphNode(card, layer, row, isBlocked) {
+      function graphNode(card, layer, row, isBlocked, entering) {
         const node = document.createElementNS(SVG_NS, "g");
         node.setAttribute("class", `node ${cardState(isBlocked, isCardComplete(card))}`);
         node.setAttribute(
@@ -683,11 +961,16 @@
         full.textContent = card.title;
         node.appendChild(full);
 
+        // The body carries the entrance, so moving it cannot disturb the node's
+        // own positioning transform.
+        const body = document.createElementNS(SVG_NS, "g");
+        if (entering) markEntering(body);
+
         const box = document.createElementNS(SVG_NS, "rect");
         box.setAttribute("width", String(NODE_W));
         box.setAttribute("height", String(NODE_H));
         box.setAttribute("rx", "12");
-        node.appendChild(box);
+        body.appendChild(box);
 
         // HTML inside the node lets the browser measure the title itself, so it
         // ellipsizes cleanly whatever the glyphs — and the full title stays on
@@ -701,15 +984,16 @@
         title.setAttribute("class", "node-title");
         title.textContent = card.title;
         titleBox.appendChild(title);
-        node.appendChild(titleBox);
+        body.appendChild(titleBox);
 
         const status = document.createElementNS(SVG_NS, "text");
         status.setAttribute("class", "node-status");
         status.setAttribute("x", "14");
         status.setAttribute("y", "45");
         status.textContent = isBlocked ? "Blocked" : cardStatus(card);
-        node.appendChild(status);
+        body.appendChild(status);
 
+        node.appendChild(body);
         return node;
       }
 
@@ -726,11 +1010,16 @@
         return done === card.tasks.length ? "Complete" : `${done}/${card.tasks.length} tasks`;
       }
 
-      function renderCard(card) {
+      function renderCard(card, cues) {
         const el = document.createElement("section");
         const state = cardState(isCardBlocked(doc, card.id), isCardComplete(card));
         const blocked = state === "blocked";
         el.className = blocked ? "card blocked" : "card";
+        if (cues !== null && cues.entering.has(card.id)) {
+          markEntering(el);
+        } else if (cues !== null && cues.unblocked.has(card.id)) {
+          el.classList.add("anim-unblock");
+        }
 
         const head = document.createElement("div");
         head.className = "card-head";
@@ -748,6 +1037,17 @@
           badge.textContent = "Complete";
           head.appendChild(badge);
         }
+        const removeCard = document.createElement("button");
+        removeCard.type = "button";
+        removeCard.className = "mini-action";
+        removeCard.textContent = "delete";
+        removeCard.title = "Delete this card and its tasks";
+        removeCard.disabled = blocked;
+        removeCard.addEventListener("click", () =>
+          scheduleRemoval((d) => deleteCard(d, card.id), el, el),
+        );
+        head.appendChild(removeCard);
+
         el.appendChild(head);
 
         if (blocked) {
@@ -759,7 +1059,7 @@
 
         const list = document.createElement("ul");
         list.className = "tasks";
-        for (const task of card.tasks) list.appendChild(renderTask(task, card.id, blocked));
+        for (const task of card.tasks) list.appendChild(renderTask(task, card.id, blocked, cues));
         el.appendChild(list);
 
         const add = document.createElement("div");
@@ -832,11 +1132,16 @@
         return el;
       }
 
-      function renderTask(task, cardId, blocked) {
+      function renderTask(task, cardId, blocked, cues) {
         const li = document.createElement("li");
         const complete = isTaskComplete(task);
         const isLeaf = task.subtasks.length === 0;
         if (complete) li.classList.add("done");
+        if (cues !== null && cues.entering.has(task.id)) {
+          markEntering(li);
+        } else if (cues !== null && cues.toggled.has(task.id)) {
+          li.classList.add("anim-settle");
+        }
 
         const row = document.createElement("div");
         row.className = "row";
@@ -858,7 +1163,7 @@
         row.appendChild(label);
 
         const addSub = document.createElement("button");
-        addSub.className = "add-sub";
+        addSub.className = "mini-action";
         addSub.textContent = "+ sub";
         addSub.title = "Add a sub-task";
         addSub.disabled = blocked;
@@ -866,19 +1171,30 @@
         row.appendChild(addSub);
 
         const renameButton = document.createElement("button");
-        renameButton.className = "add-sub";
+        renameButton.className = "mini-action";
         renameButton.textContent = "rename";
         renameButton.title = "Rename this task";
         renameButton.disabled = blocked;
         renameButton.addEventListener("click", () => startRename(label, task));
         row.appendChild(renameButton);
 
+        const removeTask = document.createElement("button");
+        removeTask.type = "button";
+        removeTask.className = "mini-action";
+        removeTask.textContent = "delete";
+        removeTask.title = "Delete this task and its sub-tasks";
+        removeTask.disabled = blocked;
+        removeTask.addEventListener("click", () =>
+          scheduleRemoval((d) => deleteTask(d, task.id), li, li),
+        );
+        row.appendChild(removeTask);
+
         li.appendChild(row);
 
         if (task.subtasks.length > 0) {
           const children = document.createElement("ul");
           children.className = "tasks";
-          for (const child of task.subtasks) children.appendChild(renderTask(child, cardId, blocked));
+          for (const child of task.subtasks) children.appendChild(renderTask(child, cardId, blocked, cues));
           li.appendChild(children);
         }
 
@@ -970,7 +1286,7 @@
       });
 
       if (restored.error !== null) showError(toolbar, restored.error);
-      render();
+      render(null);
     </script>
   </body>
 </html>
