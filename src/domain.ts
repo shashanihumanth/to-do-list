@@ -20,10 +20,10 @@ export type DomainError =
   | "card-blocked"
   | "card-has-dependents";
 
-/** A command result: the new document, or a reason the command was rejected. */
-export type Result<T> =
+/** A result: a value, or the reason it could not be produced. */
+export type Result<T, E = DomainError> =
   | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: DomainError };
+  | { readonly ok: false; readonly error: E };
 
 /** The versioned document: cards plus the (future) dependency edges between them. */
 export interface Document {
