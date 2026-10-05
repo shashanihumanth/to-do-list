@@ -1,7 +1,9 @@
 <!doctype html>
 <!--
   Minimal demo of the domain model. A dependency-free list UI that renders
-  cards with nested sub-tasks (indented) and lets you tick a leaf complete.
+  cards with nested sub-tasks (indented), lets you tick a leaf complete, and
+  wires cards into a flow-ordered graph: a card whose prerequisite is
+  incomplete renders blocked and read-only.
 
   Build once, then serve the repo root (ES modules need HTTP, not file://):
 
@@ -99,6 +101,45 @@
         color: #b4574e;
         font-size: 0.85rem;
       }
+      .card.blocked { opacity: 0.72; }
+      .card.blocked h2 { color: var(--muted); }
+      .badge.blocked { background: #fbeceb; color: #b4574e; }
+      button:disabled { opacity: 0.45; cursor: not-allowed; }
+      .deps {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.4rem;
+        margin-top: 0.7rem;
+        padding-top: 0.6rem;
+        border-top: 1px dashed var(--line);
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      .dep {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.15rem 0.35rem 0.15rem 0.6rem;
+        border-radius: 999px;
+        background: #f2efe9;
+        color: var(--ink);
+      }
+      .dep button {
+        padding: 0 0.3rem;
+        background: transparent;
+        color: var(--muted);
+        font-size: 0.9rem;
+        line-height: 1.2;
+      }
+      .deps select {
+        font: inherit;
+        padding: 0.25rem 0.4rem;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--card);
+      }
+      .deps .error { margin: 0; }
       .empty { color: var(--muted); font-size: 0.9rem; }
     </style>
   </head>
@@ -115,10 +156,13 @@
     <script type="module">
       import {
         addCard,
+        addEdge,
         addTask,
         createDocument,
+        isCardBlocked,
         isCardComplete,
         isTaskComplete,
+        removeEdge,
         renameTask,
         toggleTaskComplete,
       } from "../dist/domain.js";
@@ -143,15 +187,23 @@
         container.querySelector(":scope > .error")?.remove();
       }
 
+      /** Human wording for each domain rejection the demo can trigger. */
+      const REJECTION_MESSAGES = {
+        "duplicate-title": "Another task here already has that name.",
+        "card-blocked": "This card is blocked until its prerequisite completes.",
+        cycle: "That connection would create a cycle.",
+        "duplicate-edge": "Those cards are already connected.",
+        "edge-not-found": "That connection no longer exists.",
+        "card-has-dependents": "Another card still waits on this one.",
+      };
+
       /**
        * Surface a rejected command inline, next to the control that triggered
        * it — never silently dropped, never a blocking alert().
        */
       function showRejection(container, result, afterNode) {
         const message =
-          result.error === "duplicate-title"
-            ? "Another task here already has that name."
-            : `Could not apply that change: ${result.error}.`;
+          REJECTION_MESSAGES[result.error] ?? `Could not apply that change: ${result.error}.`;
         showError(container, message, afterNode);
       }
 
@@ -180,14 +232,20 @@
 
       function renderCard(card) {
         const el = document.createElement("section");
-        el.className = "card";
+        const blocked = isCardBlocked(doc, card.id);
+        el.className = blocked ? "card blocked" : "card";
 
         const head = document.createElement("div");
         head.className = "card-head";
         const title = document.createElement("h2");
         title.textContent = card.title;
         head.appendChild(title);
-        if (isCardComplete(card)) {
+        if (blocked) {
+          const badge = document.createElement("span");
+          badge.className = "badge blocked";
+          badge.textContent = "Blocked";
+          head.appendChild(badge);
+        } else if (isCardComplete(card)) {
           const badge = document.createElement("span");
           badge.className = "badge";
           badge.textContent = "Complete";
@@ -195,9 +253,16 @@
         }
         el.appendChild(head);
 
+        if (blocked) {
+          const note = document.createElement("p");
+          note.className = "empty";
+          note.textContent = "Read-only until its prerequisite completes.";
+          el.appendChild(note);
+        }
+
         const list = document.createElement("ul");
         list.className = "tasks";
-        for (const task of card.tasks) list.appendChild(renderTask(task, card.id));
+        for (const task of card.tasks) list.appendChild(renderTask(task, card.id, blocked));
         el.appendChild(list);
 
         const add = document.createElement("div");
@@ -205,17 +270,72 @@
         const input = document.createElement("input");
         input.type = "text";
         input.placeholder = "New task…";
+        input.disabled = blocked;
         input.addEventListener("input", () => clearError(el));
         const button = document.createElement("button");
         button.textContent = "Add task";
+        button.disabled = blocked;
         button.addEventListener("click", () => applyResult(addTask(doc, card.id, input.value), el, add));
         add.append(input, button);
         el.appendChild(add);
 
+        el.appendChild(renderDeps(card));
+
         return el;
       }
 
-      function renderTask(task, cardId) {
+      /** Render a card's prerequisites, plus a control to connect another card to it. */
+      function renderDeps(card) {
+        const el = document.createElement("div");
+        el.className = "deps";
+
+        const label = document.createElement("span");
+        label.textContent = "Blocked by:";
+        el.appendChild(label);
+
+        for (const edge of doc.edges.filter((e) => e.dependentId === card.id)) {
+          const prerequisite = doc.cards.find((c) => c.id === edge.prerequisiteId);
+          const chip = document.createElement("span");
+          chip.className = "dep";
+          const name = document.createElement("span");
+          name.textContent = prerequisite ? prerequisite.title : "unknown";
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.textContent = "×";
+          remove.title = "Remove this prerequisite";
+          remove.addEventListener("click", () => applyResult(removeEdge(doc, edge.prerequisiteId, card.id), el));
+          chip.append(name, remove);
+          el.appendChild(chip);
+        }
+
+        const candidates = doc.cards.filter((c) => c.id !== card.id);
+        if (candidates.length > 0) {
+          const select = document.createElement("select");
+          select.title = "Card that must finish first";
+          const placeholder = document.createElement("option");
+          placeholder.value = "";
+          placeholder.textContent = "must finish first…";
+          select.appendChild(placeholder);
+          for (const candidate of candidates) {
+            const option = document.createElement("option");
+            option.value = candidate.id;
+            option.textContent = candidate.title;
+            select.appendChild(option);
+          }
+          const connect = document.createElement("button");
+          connect.type = "button";
+          connect.textContent = "Connect";
+          connect.addEventListener("click", () => {
+            if (select.value === "") return;
+            applyResult(addEdge(doc, select.value, card.id), el);
+          });
+          el.append(select, connect);
+        }
+
+        return el;
+      }
+
+      function renderTask(task, cardId, blocked) {
         const li = document.createElement("li");
         const complete = isTaskComplete(task);
         const isLeaf = task.subtasks.length === 0;
@@ -227,8 +347,9 @@
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
         checkbox.checked = complete;
-        // Completion of a parent is derived from its sub-tasks; only leaves toggle.
-        checkbox.disabled = !isLeaf;
+        // Completion of a parent is derived from its sub-tasks; only leaves
+        // toggle, and a blocked card's tasks are all read-only.
+        checkbox.disabled = !isLeaf || blocked;
         checkbox.addEventListener("change", () => {
           const result = toggleTaskComplete(doc, task.id);
           if (result.ok) {
@@ -246,6 +367,7 @@
         addSub.className = "add-sub";
         addSub.textContent = "+ sub";
         addSub.title = "Add a sub-task";
+        addSub.disabled = blocked;
         addSub.addEventListener("click", () => appendSubTaskForm(li, cardId, task.id));
         row.appendChild(addSub);
 
@@ -253,6 +375,7 @@
         renameButton.className = "add-sub";
         renameButton.textContent = "rename";
         renameButton.title = "Rename this task";
+        renameButton.disabled = blocked;
         renameButton.addEventListener("click", () => startRename(label, task));
         row.appendChild(renameButton);
 
@@ -261,7 +384,7 @@
         if (task.subtasks.length > 0) {
           const children = document.createElement("ul");
           children.className = "tasks";
-          for (const child of task.subtasks) children.appendChild(renderTask(child, cardId));
+          for (const child of task.subtasks) children.appendChild(renderTask(child, cardId, blocked));
           li.appendChild(children);
         }
 

@@ -2,18 +2,22 @@ import { describe, expect, it } from "vitest";
 
 import {
   addCard,
+  addEdge,
   addTask,
   createDocument,
   deleteCard,
   deleteTask,
   hasDuplicateSibling,
+  isCardBlocked,
   isCardComplete,
   isTaskComplete,
   normalizeTitle,
+  removeEdge,
   renameCard,
   renameTask,
   reorderTasks,
   toggleTaskComplete,
+  type Card,
   type Document,
   type Result,
   type Task,
@@ -441,5 +445,261 @@ describe("sub-tasks & recursive completion", () => {
     // A is derived-complete, but still has no manual toggle.
     expect(toggleTaskComplete(d, tree.aId)).toEqual({ ok: false, error: "not-leaf-task" });
     expect(isTaskComplete(taskByTitle(d.cards[0]!.tasks, "A")!)).toBe(true);
+  });
+});
+
+describe("addEdge / removeEdge", () => {
+  /** Build a document with two empty cards; returns the document and both ids. */
+  function twoCards(): { doc: Document; a: string; b: string } {
+    let doc = valueOf(addCard(createDocument(), "A"));
+    doc = valueOf(addCard(doc, "B"));
+    return { doc, a: doc.cards[0]!.id, b: doc.cards[1]!.id };
+  }
+
+  it("links a prerequisite to a dependent in flow order", () => {
+    const { doc, a, b } = twoCards();
+    const linked = valueOf(addEdge(doc, a, b));
+    expect(linked.edges).toEqual([{ prerequisiteId: a, dependentId: b }]);
+  });
+
+  it("rejects an unknown prerequisite or dependent", () => {
+    const { doc, a } = twoCards();
+    expect(addEdge(doc, "missing", a)).toEqual({ ok: false, error: "card-not-found" });
+    expect(addEdge(doc, a, "missing")).toEqual({ ok: false, error: "card-not-found" });
+  });
+
+  it("rejects a self-loop", () => {
+    const { doc, a } = twoCards();
+    expect(addEdge(doc, a, a)).toEqual({ ok: false, error: "cycle" });
+  });
+
+  it("rejects a duplicate edge", () => {
+    const { doc, a, b } = twoCards();
+    const linked = valueOf(addEdge(doc, a, b));
+    expect(addEdge(linked, a, b)).toEqual({ ok: false, error: "duplicate-edge" });
+  });
+
+  it("removeEdge undoes the link", () => {
+    const { doc, a, b } = twoCards();
+    const linked = valueOf(addEdge(doc, a, b));
+    expect(valueOf(removeEdge(linked, a, b)).edges).toEqual([]);
+  });
+
+  it("rejects removing an edge that isn't there", () => {
+    const { doc, a, b } = twoCards();
+    expect(removeEdge(doc, a, b)).toEqual({ ok: false, error: "edge-not-found" });
+  });
+});
+
+describe("cycle rejection", () => {
+  /** Build three empty cards; returns the document and their ids. */
+  function threeCards(): { doc: Document; a: string; b: string; c: string } {
+    let doc = createDocument();
+    for (const title of ["A", "B", "C"]) doc = valueOf(addCard(doc, title));
+    return { doc, a: doc.cards[0]!.id, b: doc.cards[1]!.id, c: doc.cards[2]!.id };
+  }
+
+  it("rejects an edge that closes a two-card cycle", () => {
+    const { doc, a, b } = threeCards();
+    const linked = valueOf(addEdge(doc, a, b));
+    expect(addEdge(linked, b, a)).toEqual({ ok: false, error: "cycle" });
+  });
+
+  it("rejects an edge that closes a longer cycle", () => {
+    const { doc, a, b, c } = threeCards();
+    let d = valueOf(addEdge(doc, a, b));
+    d = valueOf(addEdge(d, b, c));
+    expect(addEdge(d, c, a)).toEqual({ ok: false, error: "cycle" });
+  });
+
+  it("allows a diamond — a shared prerequisite is not a cycle", () => {
+    const { doc, a, b, c } = threeCards();
+    let d = valueOf(addEdge(doc, a, b));
+    d = valueOf(addEdge(d, a, c));
+    d = valueOf(addCard(d, "D"));
+    const last = d.cards[3]!.id;
+    d = valueOf(addEdge(d, b, last));
+    d = valueOf(addEdge(d, c, last));
+    expect(d.edges).toHaveLength(4);
+  });
+});
+
+describe("isCardBlocked", () => {
+  /** Append a card with one incomplete task; returns the new document and both ids. */
+  function cardWithTask(doc: Document, title: string): { doc: Document; cardId: string; taskId: string } {
+    const added = valueOf(addCard(doc, title));
+    const cardId = added.cards[added.cards.length - 1]!.id;
+    const withTask = valueOf(addTask(added, cardId, `${title} task`));
+    const tasks = withTask.cards[withTask.cards.length - 1]!.tasks;
+    return { doc: withTask, cardId, taskId: tasks[0]!.id };
+  }
+
+  it("an unlinked card is not blocked", () => {
+    const { doc, cardId } = cardWithTask(createDocument(), "A");
+    expect(isCardBlocked(doc, cardId)).toBe(false);
+  });
+
+  it("a card is blocked while its prerequisite is incomplete", () => {
+    const first = cardWithTask(createDocument(), "A");
+    const second = cardWithTask(first.doc, "B");
+    const doc = valueOf(addEdge(second.doc, first.cardId, second.cardId));
+    expect(isCardBlocked(doc, second.cardId)).toBe(true);
+    expect(isCardBlocked(doc, first.cardId)).toBe(false);
+  });
+
+  it("an empty prerequisite blocks — an empty card is never complete", () => {
+    let doc = valueOf(addCard(createDocument(), "A"));
+    const a = doc.cards[0]!.id;
+    doc = valueOf(addCard(doc, "B"));
+    const b = doc.cards[1]!.id;
+    doc = valueOf(addEdge(doc, a, b));
+    expect(isCardBlocked(doc, b)).toBe(true);
+  });
+
+  it("unblocks once the prerequisite completes", () => {
+    const first = cardWithTask(createDocument(), "A");
+    const second = cardWithTask(first.doc, "B");
+    let doc = valueOf(addEdge(second.doc, first.cardId, second.cardId));
+    doc = valueOf(toggleTaskComplete(doc, first.taskId));
+    expect(isCardBlocked(doc, second.cardId)).toBe(false);
+  });
+
+  it("blocking is transitive down a chain", () => {
+    const a = cardWithTask(createDocument(), "A");
+    const b = cardWithTask(a.doc, "B");
+    const c = cardWithTask(b.doc, "C");
+    let doc = valueOf(addEdge(c.doc, a.cardId, b.cardId));
+    doc = valueOf(addEdge(doc, b.cardId, c.cardId));
+
+    expect(isCardBlocked(doc, c.cardId)).toBe(true); // A is incomplete
+    doc = valueOf(toggleTaskComplete(doc, a.taskId)); // A completes
+    expect(isCardBlocked(doc, b.cardId)).toBe(false);
+    expect(isCardBlocked(doc, c.cardId)).toBe(true); // B is still incomplete
+    doc = valueOf(toggleTaskComplete(doc, b.taskId)); // B completes
+    expect(isCardBlocked(doc, c.cardId)).toBe(false);
+  });
+
+  it("a complete card does not hide an incomplete ancestor", () => {
+    const task = (id: string, completed: boolean): Task => ({ id, title: id, completed, subtasks: [] });
+    const card = (id: string, tasks: readonly Task[]): Card => ({ id, title: id, tasks, order: 0 });
+    const doc: Document = {
+      version: 1,
+      cards: [card("A", [task("a", false)]), card("B", [task("b", true)]), card("C", [task("c", false)])],
+      edges: [
+        { prerequisiteId: "A", dependentId: "B" },
+        { prerequisiteId: "B", dependentId: "C" },
+      ],
+    };
+    expect(isCardBlocked(doc, "B")).toBe(true); // its prerequisite A is incomplete
+    expect(isCardBlocked(doc, "C")).toBe(true); // A is transitively incomplete
+  });
+
+  it("an unknown card is not blocked", () => {
+    expect(isCardBlocked(createDocument(), "missing")).toBe(false);
+  });
+});
+
+describe("full lock on a blocked card", () => {
+  /** A blocked pair: A (one incomplete task) → B (a leaf task and a parent task). */
+  function blockedPair(): {
+    doc: Document;
+    a: string;
+    aTask: string;
+    b: string;
+    bTask: string;
+    bParent: string;
+  } {
+    let doc = valueOf(addCard(createDocument(), "A"));
+    const a = doc.cards[0]!.id;
+    doc = valueOf(addTask(doc, a, "a-task"));
+    const aTask = doc.cards[0]!.tasks[0]!.id;
+
+    doc = valueOf(addCard(doc, "B"));
+    const b = doc.cards[1]!.id;
+    doc = valueOf(addTask(doc, b, "b-task"));
+    const bTask = doc.cards[1]!.tasks[0]!.id;
+    doc = valueOf(addTask(doc, b, "b-parent"));
+    const bParent = doc.cards[1]!.tasks[1]!.id;
+
+    doc = valueOf(addEdge(doc, a, b));
+    return { doc, a, aTask, b, bTask, bParent };
+  }
+
+  it("rejects every mutating command on the card's tasks", () => {
+    const { doc, b, bTask, bParent } = blockedPair();
+    expect(addTask(doc, b, "new")).toEqual({ ok: false, error: "card-blocked" });
+    expect(addTask(doc, b, "new", bParent)).toEqual({ ok: false, error: "card-blocked" });
+    expect(renameTask(doc, bTask, "renamed")).toEqual({ ok: false, error: "card-blocked" });
+    expect(deleteTask(doc, bTask)).toEqual({ ok: false, error: "card-blocked" });
+    expect(toggleTaskComplete(doc, bTask)).toEqual({ ok: false, error: "card-blocked" });
+    expect(reorderTasks(doc, b, [bParent, bTask])).toEqual({ ok: false, error: "card-blocked" });
+  });
+
+  it("rejects card-level mutations while blocked", () => {
+    const { doc, b } = blockedPair();
+    expect(renameCard(doc, b, "B2")).toEqual({ ok: false, error: "card-blocked" });
+    expect(deleteCard(doc, b)).toEqual({ ok: false, error: "card-blocked" });
+  });
+
+  it("leaves the unblocked prerequisite workable", () => {
+    const { doc, a, aTask } = blockedPair();
+    expect(addTask(doc, a, "another").ok).toBe(true);
+    expect(renameTask(doc, aTask, "renamed").ok).toBe(true);
+    expect(toggleTaskComplete(doc, aTask).ok).toBe(true);
+    expect(reorderTasks(doc, a, [aTask]).ok).toBe(true);
+    expect(renameCard(doc, a, "A2").ok).toBe(true);
+  });
+
+  it("mutations succeed again once the prerequisite completes", () => {
+    const { doc, aTask, b, bTask } = blockedPair();
+    const unblocked = valueOf(toggleTaskComplete(doc, aTask));
+    expect(toggleTaskComplete(unblocked, bTask).ok).toBe(true);
+  });
+
+  it("keeps the graph editable so the block can be lifted", () => {
+    const { doc, a, b, bTask } = blockedPair();
+    const withC = valueOf(addCard(doc, "C"));
+    const c = withC.cards[2]!.id;
+    // Only the blocked card's contents are read-only; it can still gain dependents.
+    const chained = valueOf(addEdge(withC, b, c));
+    expect(isCardBlocked(chained, c)).toBe(true);
+
+    const unlinked = valueOf(removeEdge(chained, a, b));
+    expect(isCardBlocked(unlinked, b)).toBe(false);
+    expect(toggleTaskComplete(unlinked, bTask).ok).toBe(true);
+  });
+});
+
+describe("deleteCard and the graph", () => {
+  /** A (one complete task) → B; returns the document and both card ids. */
+  function completedPrerequisite(): { doc: Document; a: string; b: string } {
+    let doc = valueOf(addCard(createDocument(), "A"));
+    const a = doc.cards[0]!.id;
+    doc = valueOf(addTask(doc, a, "a-task"));
+    const aTask = doc.cards[0]!.tasks[0]!.id;
+    doc = valueOf(toggleTaskComplete(doc, aTask));
+
+    doc = valueOf(addCard(doc, "B"));
+    const b = doc.cards[1]!.id;
+    doc = valueOf(addEdge(doc, a, b));
+    return { doc, a, b };
+  }
+
+  it("rejects deleting a card other cards depend on", () => {
+    const { doc, a } = completedPrerequisite();
+    expect(deleteCard(doc, a)).toEqual({ ok: false, error: "card-has-dependents" });
+  });
+
+  it("allows deleting the prerequisite once the edge is removed", () => {
+    const { doc, a, b } = completedPrerequisite();
+    const unlinked = valueOf(removeEdge(doc, a, b));
+    expect(deleteCard(unlinked, a).ok).toBe(true);
+  });
+
+  it("removes edges that point at a deleted dependent", () => {
+    const { doc, b } = completedPrerequisite();
+    const deleted = valueOf(deleteCard(doc, b));
+    expect(deleted.edges).toEqual([]);
+    expect(deleted.cards).toHaveLength(1);
   });
 });

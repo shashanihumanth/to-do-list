@@ -13,7 +13,12 @@ export type DomainError =
   | "task-not-found"
   | "duplicate-title"
   | "not-leaf-task"
-  | "invalid-reorder";
+  | "invalid-reorder"
+  | "cycle"
+  | "duplicate-edge"
+  | "edge-not-found"
+  | "card-blocked"
+  | "card-has-dependents";
 
 /** A command result: the new document, or a reason the command was rejected. */
 export type Result<T> =
@@ -80,6 +85,7 @@ export function addCard(doc: Document, title: string): Result<Document> {
 export function renameCard(doc: Document, cardId: string, title: string): Result<Document> {
   const index = doc.cards.findIndex((c) => c.id === cardId);
   if (index === -1) return fail("card-not-found");
+  if (isCardBlocked(doc, cardId)) return fail("card-blocked");
   const cards = doc.cards.slice();
   cards[index] = { ...doc.cards[index]!, title };
   return ok({ ...doc, cards });
@@ -87,7 +93,46 @@ export function renameCard(doc: Document, cardId: string, title: string): Result
 
 export function deleteCard(doc: Document, cardId: string): Result<Document> {
   if (!doc.cards.some((c) => c.id === cardId)) return fail("card-not-found");
-  return ok({ ...doc, cards: doc.cards.filter((c) => c.id !== cardId) });
+  if (isCardBlocked(doc, cardId)) return fail("card-blocked");
+  // A card other cards wait on cannot leave the graph, or they would lose a
+  // prerequisite; edges into a card that leaves go with it.
+  if (doc.edges.some((e) => e.prerequisiteId === cardId)) return fail("card-has-dependents");
+  return ok({
+    ...doc,
+    cards: doc.cards.filter((c) => c.id !== cardId),
+    edges: doc.edges.filter((e) => e.dependentId !== cardId),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Edge commands
+
+/**
+ * Link `prerequisiteId` → `dependentId` (the prerequisite first, then the
+ * dependent). Rejects an edge between unknown cards, a self-loop, a duplicate,
+ * or one that would close a cycle.
+ */
+export function addEdge(doc: Document, prerequisiteId: string, dependentId: string): Result<Document> {
+  const known = (id: string) => doc.cards.some((c) => c.id === id);
+  if (!known(prerequisiteId) || !known(dependentId)) return fail("card-not-found");
+  if (prerequisiteId === dependentId) return fail("cycle");
+  const exists = doc.edges.some(
+    (e) => e.prerequisiteId === prerequisiteId && e.dependentId === dependentId,
+  );
+  if (exists) return fail("duplicate-edge");
+  // The new edge closes a cycle when the dependent already reaches the
+  // prerequisite, since that path plus the new edge loops back on itself.
+  if (reaches(doc, dependentId, prerequisiteId)) return fail("cycle");
+  return ok({ ...doc, edges: [...doc.edges, { prerequisiteId, dependentId }] });
+}
+
+/** Remove the `prerequisiteId` → `dependentId` edge. */
+export function removeEdge(doc: Document, prerequisiteId: string, dependentId: string): Result<Document> {
+  const edges = doc.edges.filter(
+    (e) => !(e.prerequisiteId === prerequisiteId && e.dependentId === dependentId),
+  );
+  if (edges.length === doc.edges.length) return fail("edge-not-found");
+  return ok({ ...doc, edges });
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +146,7 @@ export function addTask(
 ): Result<Document> {
   const cardIndex = doc.cards.findIndex((c) => c.id === cardId);
   if (cardIndex === -1) return fail("card-not-found");
+  if (isCardBlocked(doc, cardId)) return fail("card-blocked");
   const card = doc.cards[cardIndex]!;
 
   if (parentId === undefined) {
@@ -122,6 +168,7 @@ export function renameTask(doc: Document, taskId: string, title: string): Result
     const card = doc.cards[i]!;
     const located = locateTask(card.tasks, taskId);
     if (located === null) continue;
+    if (isCardBlocked(doc, card.id)) return fail("card-blocked");
     if (hasDuplicateSibling(located.siblings, title, taskId)) return fail("duplicate-title");
     const tasks = updateTask(card.tasks, taskId, (t) => ({ ...t, title }));
     return ok(replaceCard(doc, i, { ...card, tasks: tasks ?? card.tasks }));
@@ -132,8 +179,9 @@ export function renameTask(doc: Document, taskId: string, title: string): Result
 export function deleteTask(doc: Document, taskId: string): Result<Document> {
   for (let i = 0; i < doc.cards.length; i++) {
     const card = doc.cards[i]!;
-    const tasks = updateTask(card.tasks, taskId, () => null);
-    if (tasks === null) continue;
+    if (locateTask(card.tasks, taskId) === null) continue;
+    if (isCardBlocked(doc, card.id)) return fail("card-blocked");
+    const tasks = updateTask(card.tasks, taskId, () => null)!;
     return ok(replaceCard(doc, i, { ...card, tasks }));
   }
   return fail("task-not-found");
@@ -144,6 +192,7 @@ export function toggleTaskComplete(doc: Document, taskId: string): Result<Docume
     const card = doc.cards[i]!;
     const located = locateTask(card.tasks, taskId);
     if (located === null) continue;
+    if (isCardBlocked(doc, card.id)) return fail("card-blocked");
     if (located.task.subtasks.length > 0) return fail("not-leaf-task");
     const tasks = updateTask(card.tasks, taskId, (t) => ({ ...t, completed: !t.completed }));
     return ok(replaceCard(doc, i, { ...card, tasks: tasks ?? card.tasks }));
@@ -154,6 +203,7 @@ export function toggleTaskComplete(doc: Document, taskId: string): Result<Docume
 export function reorderTasks(doc: Document, cardId: string, orderedIds: readonly string[]): Result<Document> {
   const cardIndex = doc.cards.findIndex((c) => c.id === cardId);
   if (cardIndex === -1) return fail("card-not-found");
+  if (isCardBlocked(doc, cardId)) return fail("card-blocked");
   const card = doc.cards[cardIndex]!;
 
   const byId = new Map(card.tasks.map((t) => [t.id, t]));
@@ -180,6 +230,29 @@ export function isTaskComplete(task: Task): boolean {
 /** A card is complete only when it has tasks and every one is complete. */
 export function isCardComplete(card: Card): boolean {
   return card.tasks.length > 0 && card.tasks.every(isTaskComplete);
+}
+
+/**
+ * A card is blocked while any of its prerequisites — directly or transitively —
+ * is incomplete. A card with no prerequisites is never blocked, and an unknown
+ * card id is treated as not blocked.
+ */
+export function isCardBlocked(doc: Document, cardId: string): boolean {
+  const byId = new Map(doc.cards.map((c) => [c.id, c]));
+  const seen = new Set<string>();
+  const stack = [cardId];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const edge of doc.edges) {
+      if (edge.dependentId !== id) continue;
+      const prerequisite = byId.get(edge.prerequisiteId);
+      if (prerequisite === undefined || !isCardComplete(prerequisite)) return true;
+      stack.push(edge.prerequisiteId);
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,4 +309,20 @@ function replaceCard(doc: Document, index: number, card: Card): Document {
   const cards = doc.cards.slice();
   cards[index] = card;
   return { ...doc, cards };
+}
+
+/** True when a directed path of edges leads from `fromId` to `toId`. */
+function reaches(doc: Document, fromId: string, toId: string): boolean {
+  const seen = new Set<string>();
+  const stack = [fromId];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (id === toId) return true;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const edge of doc.edges) {
+      if (edge.prerequisiteId === id) stack.push(edge.dependentId);
+    }
+  }
+  return false;
 }
