@@ -9,9 +9,13 @@
   - List — the outline, in the same flow order, where tasks are added, renamed
     and ticked, and a blocked card is read-only.
 
+  The document is persisted to localStorage on every change and loaded on
+  start; Export writes that same JSON out, Import reads one back and replaces
+  the document after validating it.
+
   Build once, then serve the repo root (ES modules need HTTP, not file://):
 
-      npx tsc               # emits dist/domain.js from src/domain.ts
+      npx tsc               # emits dist/domain.js and dist/storage.js
       npx serve .          # or: python3 -m http.server 8000
       open http://localhost:8000/demo/
 -->
@@ -224,9 +228,12 @@
   <body>
     <h1>To-Do List — demo</h1>
 
-    <div class="toolbar">
+    <div class="toolbar" id="board-toolbar">
       <input id="new-card" type="text" placeholder="New card title…" />
       <button id="add-card">Add card</button>
+      <button id="export" type="button">Export</button>
+      <button id="import-button" type="button">Import</button>
+      <input id="import-file" type="file" accept="application/json,.json" hidden />
       <div class="views" role="group" aria-label="View">
         <button id="view-graph-btn" type="button" aria-pressed="true">Graph</button>
         <button id="view-list-btn" type="button" aria-pressed="false">List</button>
@@ -255,13 +262,55 @@
         toggleTaskComplete,
         topologicalOrder,
       } from "../dist/domain.js";
-
-      let doc = createDocument();
+      import { deserializeDocument, serializeDocument } from "../dist/storage.js";
 
       const cardsEl = document.getElementById("cards");
       const graphEl = document.getElementById("view-graph");
       const newCardInput = document.getElementById("new-card");
       const viewStack = document.getElementById("view-stack");
+      const toolbar = document.getElementById("board-toolbar");
+      const importFile = document.getElementById("import-file");
+
+      /**
+       * The storage adapter: the only place browser storage is touched. The
+       * document and its JSON text come from the domain and storage modules;
+       * this carries the text there and back.
+       */
+      const STORAGE_KEY = "to-do-list/document";
+
+      /** Persist the current document; a storage failure is surfaced, never silent. */
+      function saveDocument() {
+        try {
+          localStorage.setItem(STORAGE_KEY, serializeDocument(doc));
+        } catch {
+          showError(toolbar, "This browser would not save the board — changes may be lost.");
+        }
+      }
+
+      /** The document as last saved, or an empty one with the reason it could not be read. */
+      function loadDocument() {
+        let saved;
+        try {
+          saved = localStorage.getItem(STORAGE_KEY);
+        } catch {
+          return { doc: createDocument(), error: "This browser blocks local storage, so the board will not persist." };
+        }
+        if (saved === null) return { doc: createDocument(), error: null };
+        const result = deserializeDocument(saved);
+        if (result.ok) return { doc: result.value, error: null };
+        return { doc: createDocument(), error: "The saved board could not be read — starting empty." };
+      }
+
+      const restored = loadDocument();
+      let doc = restored.doc;
+
+      /** Adopt a new document: the one write path — drop any stale notice, persist, re-render. */
+      function commit(next) {
+        doc = next;
+        clearError(toolbar);
+        saveDocument();
+        render();
+      }
 
       const VIEWS = [
         { name: "graph", el: graphEl, button: document.getElementById("view-graph-btn") },
@@ -320,6 +369,13 @@
         "card-has-dependents": "Another card still waits on this one.",
       };
 
+      /** Human wording for each reason a file cannot be imported. */
+      const IMPORT_MESSAGES = {
+        "invalid-json": "That file is not valid JSON.",
+        "unsupported-version": "That board was saved by a different version of this app.",
+        "malformed-document": "That file is not a board this app can read.",
+      };
+
       /**
        * Surface a rejected command inline, next to the control that triggered
        * it — never silently dropped, never a blocking alert().
@@ -333,8 +389,7 @@
       /** Apply a command's result: re-render on success, otherwise surface the rejection. */
       function applyResult(result, container, afterNode) {
         if (result.ok) {
-          doc = result.value;
-          render();
+          commit(result.value);
           return;
         }
         showRejection(container, result, afterNode);
@@ -653,10 +708,7 @@
         checkbox.disabled = !isLeaf || blocked;
         checkbox.addEventListener("change", () => {
           const result = toggleTaskComplete(doc, task.id);
-          if (result.ok) {
-            doc = result.value;
-            render();
-          }
+          if (result.ok) commit(result.value);
         });
         row.appendChild(checkbox);
 
@@ -749,12 +801,34 @@
         if (title.trim() === "") return;
         const result = addCard(doc, title);
         if (result.ok) {
-          doc = result.value;
+          commit(result.value);
           newCardInput.value = "";
-          render();
         }
       });
 
+      document.getElementById("export").addEventListener("click", () => {
+        const blob = new Blob([serializeDocument(doc)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "to-do-list.json";
+        document.body.append(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+      });
+
+      document.getElementById("import-button").addEventListener("click", () => importFile.click());
+      importFile.addEventListener("change", async () => {
+        const file = importFile.files?.[0];
+        if (file === undefined) return;
+        const result = deserializeDocument(await file.text());
+        importFile.value = ""; // so choosing the same file again fires change
+        if (result.ok) commit(result.value);
+        else showError(toolbar, IMPORT_MESSAGES[result.error]);
+      });
+
+      if (restored.error !== null) showError(toolbar, restored.error);
       render();
     </script>
   </body>
