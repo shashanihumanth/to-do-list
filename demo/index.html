@@ -91,8 +91,14 @@
         border-radius: 6px;
       }
       .add-sub:hover { color: var(--ink); }
-      .sub-form { display: flex; gap: 0.4rem; padding: 0.3rem 0 0.3rem 1.5rem; }
+      .sub-form { display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 0.3rem 0 0.3rem 1.5rem; }
       .sub-form input { flex: 1; }
+      .error {
+        flex-basis: 100%;
+        margin: 0.3rem 0 0;
+        color: #b4574e;
+        font-size: 0.85rem;
+      }
       .empty { color: var(--muted); font-size: 0.9rem; }
     </style>
   </head>
@@ -113,6 +119,7 @@
         createDocument,
         isCardComplete,
         isTaskComplete,
+        renameTask,
         toggleTaskComplete,
       } from "../dist/domain.js";
 
@@ -120,6 +127,43 @@
 
       const cardsEl = document.getElementById("cards");
       const newCardInput = document.getElementById("new-card");
+
+      /** Replace any inline rejection in `container` with `message`. */
+      function showError(container, message, afterNode) {
+        clearError(container);
+        const el = document.createElement("p");
+        el.className = "error";
+        el.setAttribute("role", "alert");
+        el.textContent = message;
+        container.insertBefore(el, afterNode ? afterNode.nextSibling : null);
+      }
+
+      /** Drop the inline rejection in `container`, if any. */
+      function clearError(container) {
+        container.querySelector(":scope > .error")?.remove();
+      }
+
+      /**
+       * Surface a rejected command inline, next to the control that triggered
+       * it — never silently dropped, never a blocking alert().
+       */
+      function showRejection(container, result, afterNode) {
+        const message =
+          result.error === "duplicate-title"
+            ? "Another task here already has that name."
+            : `Could not apply that change: ${result.error}.`;
+        showError(container, message, afterNode);
+      }
+
+      /** Apply a command's result: re-render on success, otherwise surface the rejection. */
+      function applyResult(result, container, afterNode) {
+        if (result.ok) {
+          doc = result.value;
+          render();
+          return;
+        }
+        showRejection(container, result, afterNode);
+      }
 
       function render() {
         cardsEl.replaceChildren();
@@ -161,17 +205,10 @@
         const input = document.createElement("input");
         input.type = "text";
         input.placeholder = "New task…";
+        input.addEventListener("input", () => clearError(el));
         const button = document.createElement("button");
         button.textContent = "Add task";
-        button.addEventListener("click", () => {
-          const result = addTask(doc, card.id, input.value);
-          if (result.ok) {
-            doc = result.value;
-            render();
-          } else {
-            alert(`Could not add task: ${result.error}`);
-          }
-        });
+        button.addEventListener("click", () => applyResult(addTask(doc, card.id, input.value), el, add));
         add.append(input, button);
         el.appendChild(add);
 
@@ -212,6 +249,13 @@
         addSub.addEventListener("click", () => appendSubTaskForm(li, cardId, task.id));
         row.appendChild(addSub);
 
+        const renameButton = document.createElement("button");
+        renameButton.className = "add-sub";
+        renameButton.textContent = "rename";
+        renameButton.title = "Rename this task";
+        renameButton.addEventListener("click", () => startRename(label, task));
+        row.appendChild(renameButton);
+
         li.appendChild(row);
 
         if (task.subtasks.length > 0) {
@@ -224,6 +268,32 @@
         return li;
       }
 
+      /** Swap a task's label for an input; Enter renames, Escape or blur cancels. */
+      function startRename(label, task) {
+        const li = label.closest("li");
+        const row = label.closest(".row");
+        const input = document.createElement("input");
+        input.type = "text";
+        input.value = task.title;
+        label.replaceWith(input);
+        input.focus();
+        input.select();
+
+        const cancel = () => {
+          input.replaceWith(label);
+          clearError(li);
+        };
+        input.addEventListener("input", () => clearError(li));
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            if (input.value.trim() === "") return;
+            applyResult(renameTask(doc, task.id, input.value), li, row);
+          }
+          if (event.key === "Escape") cancel();
+        });
+        input.addEventListener("blur", cancel);
+      }
+
       function appendSubTaskForm(li, cardId, parentId) {
         const form = document.createElement("div");
         form.className = "sub-form";
@@ -231,17 +301,11 @@
         const input = document.createElement("input");
         input.type = "text";
         input.placeholder = "Sub-task title…";
+        input.addEventListener("input", () => clearError(form));
 
         const submit = () => {
-          const title = input.value;
-          if (title.trim() === "") return;
-          const result = addTask(doc, cardId, title, parentId);
-          if (result.ok) {
-            doc = result.value;
-            render();
-          } else {
-            alert(`Could not add sub-task: ${result.error}`);
-          }
+          if (input.value.trim() === "") return;
+          applyResult(addTask(doc, cardId, input.value, parentId), form);
         };
 
         const button = document.createElement("button");

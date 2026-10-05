@@ -45,6 +45,11 @@ describe("normalizeTitle", () => {
     expect(normalizeTitle("Buy Milk")).toBe("buy milk");
     expect(normalizeTitle("café")).toBe(normalizeTitle("cafe\u0301"));
   });
+
+  it("trims outer whitespace and normalizes Unicode, but treats inner whitespace as significant", () => {
+    expect(normalizeTitle("\tÅ\n")).toBe(normalizeTitle("A\u030a"));
+    expect(normalizeTitle("buy  milk")).not.toBe(normalizeTitle("buy milk"));
+  });
 });
 
 describe("hasDuplicateSibling", () => {
@@ -130,6 +135,35 @@ describe("addTask", () => {
     expect(addTask(added, cardId, "  BUY MILK  ")).toEqual({ ok: false, error: "duplicate-title" });
   });
 
+  it("rejects a duplicate sub-task title among its siblings", () => {
+    const { doc, cardId } = docWithCard();
+    let d = valueOf(addTask(doc, cardId, "Parent"));
+    const parentId = d.cards[0]!.tasks[0]!.id;
+    d = valueOf(addTask(d, cardId, "Buy milk", parentId));
+    expect(addTask(d, cardId, " BUY MILK ", parentId)).toEqual({ ok: false, error: "duplicate-title" });
+  });
+
+  it("allows the same title under different parents", () => {
+    const { doc, cardId } = docWithCard();
+    let d = valueOf(addTask(doc, cardId, "Milk"));
+    const parentId = d.cards[0]!.tasks[0]!.id;
+    d = valueOf(addTask(d, cardId, "Milk", parentId));
+    expect(d.cards[0]!.tasks).toHaveLength(1);
+    expect(d.cards[0]!.tasks[0]!.subtasks[0]!.title).toBe("Milk");
+  });
+
+  it("allows the same sub-task title under different parents", () => {
+    const { doc, cardId } = docWithCard();
+    let d = valueOf(addTask(doc, cardId, "One"));
+    const oneId = d.cards[0]!.tasks[0]!.id;
+    d = valueOf(addTask(d, cardId, "Two"));
+    const twoId = d.cards[0]!.tasks[1]!.id;
+    d = valueOf(addTask(d, cardId, "Child", oneId));
+    d = valueOf(addTask(d, cardId, "Child", twoId));
+    expect(d.cards[0]!.tasks[0]!.subtasks[0]!.title).toBe("Child");
+    expect(d.cards[0]!.tasks[1]!.subtasks[0]!.title).toBe("Child");
+  });
+
   it("nests a sub-task under a parent", () => {
     const { doc, cardId } = docWithCard();
     const added = valueOf(addTask(doc, cardId, "Parent"));
@@ -159,6 +193,42 @@ describe("renameTask", () => {
     const first = d.cards[0]!.tasks[0]!.id;
     d = valueOf(addTask(d, cardId, "Two"));
     expect(renameTask(d, first, "two")).toEqual({ ok: false, error: "duplicate-title" });
+  });
+
+  it("rejects renaming onto a sibling's title that differs only by Unicode composition", () => {
+    const { doc, cardId } = docWithCard();
+    let d = valueOf(addTask(doc, cardId, "café"));
+    d = valueOf(addTask(d, cardId, "Tea"));
+    const tea = d.cards[0]!.tasks[1]!.id;
+    expect(renameTask(d, tea, "cafe\u0301")).toEqual({ ok: false, error: "duplicate-title" });
+  });
+
+  it("rejects renaming a sub-task onto a sibling sub-task's title", () => {
+    const { doc, cardId } = docWithCard();
+    let d = valueOf(addTask(doc, cardId, "Parent"));
+    const parentId = d.cards[0]!.tasks[0]!.id;
+    d = valueOf(addTask(d, cardId, "One", parentId));
+    const one = d.cards[0]!.tasks[0]!.subtasks[0]!.id;
+    d = valueOf(addTask(d, cardId, "Two", parentId));
+    expect(renameTask(d, one, "two")).toEqual({ ok: false, error: "duplicate-title" });
+  });
+
+  it("allows renaming a task to its own title in another form, keeping the raw title", () => {
+    const { doc, cardId } = docWithCard();
+    const added = valueOf(addTask(doc, cardId, "Buy milk"));
+    const taskId = added.cards[0]!.tasks[0]!.id;
+    const renamed = valueOf(renameTask(added, taskId, "  BUY MILK  "));
+    expect(renamed.cards[0]!.tasks[0]!.title).toBe("  BUY MILK  ");
+  });
+
+  it("allows renaming to a title used by a task under a different parent", () => {
+    const { doc, cardId } = docWithCard();
+    let d = valueOf(addTask(doc, cardId, "Milk"));
+    const parentId = d.cards[0]!.tasks[0]!.id;
+    d = valueOf(addTask(d, cardId, "Child", parentId));
+    const childId = d.cards[0]!.tasks[0]!.subtasks[0]!.id;
+    const renamed = valueOf(renameTask(d, childId, "Milk"));
+    expect(renamed.cards[0]!.tasks[0]!.subtasks[0]!.title).toBe("Milk");
   });
 
   it("rejects an unknown task id", () => {

@@ -59,9 +59,14 @@ export function createDocument(): Document {
   return { version: 1, cards: [], edges: [] };
 }
 
-/** The canonical form of a title: trimmed, case-folded, Unicode NFC. */
+/**
+ * The canonical form of a title: trimmed, case-folded, Unicode NFC.
+ *
+ * The fold is the simple one JS exposes (`toLowerCase`); full-fold
+ * equivalences such as "ß" ⇄ "ss" are deliberately out of scope.
+ */
 export function normalizeTitle(title: string): string {
-  return title.normalize("NFC").trim().toLowerCase();
+  return title.trim().toLowerCase().normalize("NFC");
 }
 
 // ---------------------------------------------------------------------------

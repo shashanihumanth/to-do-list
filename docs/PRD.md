@@ -22,7 +22,7 @@ Not solving: collaboration, scheduling, or cross-device sync.
 ## Success — how we'll know it's solved
 
 1. **Completion & blocking integrity** — a task can never be marked complete while a sub-task is incomplete, and a card can never start while a prerequisite card is incomplete (both enforced by the model, not a soft warning).
-2. **No duplicates** — no two tasks in a card share a normalized title; adding a duplicate is rejected or surfaced, never silently created.
+2. **No duplicates** — no two sibling tasks (tasks under the same parent) share a normalized title; adding a duplicate is rejected or surfaced, never silently created.
 3. **Fast entry** — a new task can be added in ≤ 2 seconds (single field + Enter), with no modal or extra confirmation.
 4. **Feels premium, always legible** — every state is legible in light and dark mode using only the pastel palette, and interactions animate smoothly with no layout jump or theme flash.
 
@@ -35,7 +35,7 @@ A single user (Humanth) on desktop web, reasonably usable on mobile. No accounts
 The core model in eight moving pieces:
 
 1. **Card** — a titled container of tasks; create, edit, delete.
-2. **Task** — an item in a card; add, edit, delete, complete. Titles are normalized (trim + case) to catch duplicates.
+2. **Task** — an item in a card; add, edit, delete, complete. Titles are normalized (trim + case-fold + Unicode NFC) to catch duplicates among siblings.
 3. **Sub-task** — tasks nest into a tree (not just one level).
 4. **Completion rule** — a task is completable only when its sub-tasks are complete; a card only when its tasks are (a card needs ≥1 task to be completable).
 5. **Dependency graph** — cards link with directed edges in flow order; a card can't *start* until its prerequisite cards complete, and is read-only while blocked.
