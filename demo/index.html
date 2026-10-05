@@ -1,9 +1,13 @@
 <!doctype html>
 <!--
-  Minimal demo of the domain model. A dependency-free list UI that renders
-  cards with nested sub-tasks (indented), lets you tick a leaf complete, and
-  wires cards into a flow-ordered graph: a card whose prerequisite is
-  incomplete renders blocked and read-only.
+  Minimal demo of the domain model. A dependency-free UI with two views of the
+  same document: the flow chart the board is primarily read as, and an outline
+  for entering and scanning tasks quickly.
+
+  - Graph — cards as nodes in flow order, edges drawn between them, blocked
+    cards distinguished. Read-only; it is where the pipeline is read.
+  - List — the outline, in the same flow order, where tasks are added, renamed
+    and ticked, and a blocked card is read-only.
 
   Build once, then serve the repo root (ES modules need HTTP, not file://):
 
@@ -25,6 +29,9 @@
         --accent: #7fb5a9;
         --accent-ink: #ffffff;
         --line: #e8e2d8;
+        --flow: #c9c2b6;
+        --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+        --dur-view: 180ms;
       }
       * { box-sizing: border-box; }
       body {
@@ -35,7 +42,25 @@
         background: var(--bg);
       }
       h1 { font-size: 1.25rem; margin: 0 0 1rem; }
-      .toolbar { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
+      .toolbar { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.5rem; }
+      .views {
+        display: inline-flex;
+        gap: 0.15rem;
+        margin-left: auto;
+        align-self: center;
+        padding: 0.2rem;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--card);
+      }
+      .views button {
+        padding: 0.35rem 0.85rem;
+        border-radius: 999px;
+        background: transparent;
+        color: var(--muted);
+        transition: background-color 140ms ease, color 140ms ease;
+      }
+      .views button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
       input {
         font: inherit;
         padding: 0.5rem 0.7rem;
@@ -53,6 +78,59 @@
         color: var(--accent-ink);
         cursor: pointer;
       }
+      /* Two views, one slot. Only the active view is in flow — the other is
+         lifted out and hidden, so a tall outline never stretches the graph.
+         On a toggle the outgoing view stays put and fades out under the
+         incoming one, which is what makes it a crossfade and not a cut. */
+      .view-stack { position: relative; }
+      .view {
+        position: absolute;
+        inset: 0 0 auto 0;
+        opacity: 0;
+        visibility: hidden;
+        transform: translateY(4px);
+        transition:
+          opacity var(--dur-view) var(--ease-out),
+          transform var(--dur-view) var(--ease-out),
+          visibility 0s linear var(--dur-view);
+      }
+      .view.active {
+        position: relative;
+        opacity: 1;
+        visibility: visible;
+        transform: none;
+        transition:
+          opacity var(--dur-view) var(--ease-out),
+          transform var(--dur-view) var(--ease-out),
+          visibility 0s;
+      }
+      .view-stack.instant .view { transition: none; }
+      @media (prefers-reduced-motion: reduce) {
+        .view,
+        .view.active {
+          transform: none;
+          transition: opacity 120ms ease, visibility 0s linear 120ms;
+        }
+        .view.active { transition: opacity 120ms ease, visibility 0s; }
+      }
+      .view-note { margin: 0; color: var(--muted); font-size: 0.85rem; }
+      .flow { display: block; max-width: 100%; height: auto; }
+      .node rect { fill: var(--card); stroke: var(--line); stroke-width: 1.5; }
+      .node.blocked rect { fill: #fbeceb; stroke: #d9a39d; stroke-dasharray: 5 4; }
+      .node.complete rect { fill: #eef6f3; stroke: #9fcdc1; }
+      .node-title {
+        font: 600 13px system-ui, sans-serif;
+        line-height: 18px;
+        color: var(--ink);
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .node.blocked .node-title { color: var(--muted); }
+      .node-status { font: 11px system-ui, sans-serif; fill: var(--muted); }
+      .node.blocked .node-status { fill: #b4574e; }
+      .edge { fill: none; stroke: var(--flow); stroke-width: 1.5; }
+      .edge-head { fill: var(--flow); }
       .cards { display: grid; gap: 1rem; max-width: 40rem; }
       .card {
         background: var(--card);
@@ -149,15 +227,25 @@
     <div class="toolbar">
       <input id="new-card" type="text" placeholder="New card title…" />
       <button id="add-card">Add card</button>
+      <div class="views" role="group" aria-label="View">
+        <button id="view-graph-btn" type="button" aria-pressed="true">Graph</button>
+        <button id="view-list-btn" type="button" aria-pressed="false">List</button>
+      </div>
     </div>
 
-    <div class="cards" id="cards"></div>
+    <div class="view-stack" id="view-stack">
+      <section class="view active" id="view-graph" aria-label="Flow chart"></section>
+      <section class="view" id="view-list" aria-label="Outline">
+        <div class="cards" id="cards"></div>
+      </section>
+    </div>
 
     <script type="module">
       import {
         addCard,
         addEdge,
         addTask,
+        blockedSet,
         createDocument,
         isCardBlocked,
         isCardComplete,
@@ -165,12 +253,47 @@
         removeEdge,
         renameTask,
         toggleTaskComplete,
+        topologicalOrder,
       } from "../dist/domain.js";
 
       let doc = createDocument();
 
       const cardsEl = document.getElementById("cards");
+      const graphEl = document.getElementById("view-graph");
       const newCardInput = document.getElementById("new-card");
+      const viewStack = document.getElementById("view-stack");
+
+      const VIEWS = [
+        { name: "graph", el: graphEl, button: document.getElementById("view-graph-btn") },
+        { name: "list", el: document.getElementById("view-list"), button: document.getElementById("view-list-btn") },
+      ];
+      let view = "graph";
+
+      /**
+       * Show one view and hide the other. The two crossfade; a toggle from the
+       * keyboard swaps instantly, because keyboard actions get no animation.
+       */
+      function setView(name, animate = true) {
+        if (name === view) return;
+        view = name;
+        if (!animate) viewStack.classList.add("instant");
+        for (const entry of VIEWS) {
+          const active = entry.name === name;
+          entry.el.classList.toggle("active", active);
+          entry.button.setAttribute("aria-pressed", String(active));
+        }
+        if (!animate) {
+          void viewStack.offsetWidth; // let the swap settle before transitions return
+          viewStack.classList.remove("instant");
+        }
+      }
+
+      for (const entry of VIEWS) {
+        entry.button.addEventListener("click", (event) => {
+          // A click synthesised by Enter/Space has detail 0 — that's the keyboard.
+          setView(entry.name, event.detail !== 0);
+        });
+      }
 
       /** Replace any inline rejection in `container` with `message`. */
       function showError(container, message, afterNode) {
@@ -217,22 +340,200 @@
         showRejection(container, result, afterNode);
       }
 
+      /** Render both views; the toggle only decides which one is visible. */
       function render() {
+        renderList();
+        renderGraph();
+      }
+
+      function emptyMessage() {
+        const empty = document.createElement("p");
+        empty.className = "empty";
+        empty.textContent = "No cards yet — add one above.";
+        return empty;
+      }
+
+      /** The outline: every card in flow order, each with its tasks indented. */
+      function renderList() {
         cardsEl.replaceChildren();
         if (doc.cards.length === 0) {
-          const empty = document.createElement("p");
-          empty.className = "empty";
-          empty.textContent = "No cards yet — add one above.";
-          cardsEl.appendChild(empty);
+          cardsEl.appendChild(emptyMessage());
+          return;
         }
-        for (const card of doc.cards) {
-          cardsEl.appendChild(renderCard(card));
+        if (doc.edges.length > 0) {
+          const note = document.createElement("p");
+          note.className = "view-note";
+          note.textContent = "In flow order — a card waits for the cards above it.";
+          cardsEl.appendChild(note);
         }
+        const byId = new Map(doc.cards.map((c) => [c.id, c]));
+        for (const id of topologicalOrder(doc)) {
+          const card = byId.get(id);
+          if (card !== undefined) cardsEl.appendChild(renderCard(card));
+        }
+      }
+
+      const SVG_NS = "http://www.w3.org/2000/svg";
+      const XHTML_NS = "http://www.w3.org/1999/xhtml";
+      const NODE_W = 168;
+      const NODE_H = 60;
+      const GAP_X = 72;
+      const GAP_Y = 28;
+      const PAD = 8;
+
+      /**
+       * The flow chart: each card a node, each edge drawn between them. Nodes
+       * sit in layers, a card one column right of its latest prerequisite, so
+       * every edge points forwards.
+       */
+      function renderGraph() {
+        graphEl.replaceChildren();
+        if (doc.cards.length === 0) {
+          graphEl.appendChild(emptyMessage());
+          return;
+        }
+
+        const byId = new Map(doc.cards.map((c) => [c.id, c]));
+        const blocked = blockedSet(doc);
+        const ids = topologicalOrder(doc);
+        const layerOf = new Map();
+        const rowOf = new Map();
+        const rows = [];
+
+        for (const id of ids) {
+          // `ids` is topological, so every prerequisite's layer is already known.
+          let layer = 0;
+          for (const edge of doc.edges) {
+            if (edge.dependentId !== id) continue;
+            const from = layerOf.get(edge.prerequisiteId);
+            if (from !== undefined) layer = Math.max(layer, from + 1);
+          }
+          const row = rows[layer] ?? 0;
+          rows[layer] = row + 1;
+          layerOf.set(id, layer);
+          rowOf.set(id, row);
+        }
+
+        const width = rows.length * (NODE_W + GAP_X) - GAP_X + PAD * 2;
+        const tallest = rows.reduce((max, count) => Math.max(max, count ?? 0), 1);
+        const height = tallest * (NODE_H + GAP_Y) - GAP_Y + PAD * 2;
+        const svg = document.createElementNS(SVG_NS, "svg");
+        svg.setAttribute("class", "flow");
+        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        svg.setAttribute("width", String(width));
+        svg.setAttribute("height", String(height));
+        svg.setAttribute("role", "img");
+        svg.setAttribute("aria-label", `Flow chart: ${doc.cards.length} cards, ${doc.edges.length} edges`);
+        svg.appendChild(edgeMarker());
+
+        for (const edge of doc.edges) {
+          const path = edgePath(edge, layerOf, rowOf);
+          if (path !== null) svg.appendChild(path);
+        }
+        for (const id of ids) {
+          const card = byId.get(id);
+          if (card !== undefined) svg.appendChild(graphNode(card, layerOf.get(id), rowOf.get(id), blocked.has(id)));
+        }
+
+        graphEl.appendChild(svg);
+      }
+
+      /** The marker every edge ends in. */
+      function edgeMarker() {
+        const defs = document.createElementNS(SVG_NS, "defs");
+        const marker = document.createElementNS(SVG_NS, "marker");
+        marker.setAttribute("id", "edge-marker");
+        marker.setAttribute("markerWidth", "8");
+        marker.setAttribute("markerHeight", "8");
+        marker.setAttribute("refX", "7");
+        marker.setAttribute("refY", "4");
+        marker.setAttribute("orient", "auto");
+        const tip = document.createElementNS(SVG_NS, "path");
+        tip.setAttribute("class", "edge-head");
+        tip.setAttribute("d", "M0,0 L8,4 L0,8 z");
+        marker.appendChild(tip);
+        defs.appendChild(marker);
+        return defs;
+      }
+
+      /** The path for an edge, curving from a prerequisite's right edge to its dependent's left. */
+      function edgePath(edge, layerOf, rowOf) {
+        const from = layerOf.get(edge.prerequisiteId);
+        const to = layerOf.get(edge.dependentId);
+        if (from === undefined || to === undefined) return null;
+        const x1 = PAD + from * (NODE_W + GAP_X) + NODE_W;
+        const y1 = PAD + rowOf.get(edge.prerequisiteId) * (NODE_H + GAP_Y) + NODE_H / 2;
+        const x2 = PAD + to * (NODE_W + GAP_X);
+        const y2 = PAD + rowOf.get(edge.dependentId) * (NODE_H + GAP_Y) + NODE_H / 2;
+        const bend = Math.max((x2 - x1) / 2, 20);
+        const path = document.createElementNS(SVG_NS, "path");
+        path.setAttribute("class", "edge");
+        path.setAttribute("d", `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`);
+        path.setAttribute("marker-end", "url(#edge-marker)");
+        return path;
+      }
+
+      /** One card as a node: title and progress, styled by its derived state. */
+      function graphNode(card, layer, row, isBlocked) {
+        const node = document.createElementNS(SVG_NS, "g");
+        node.setAttribute("class", `node ${cardState(isBlocked, isCardComplete(card))}`);
+        node.setAttribute(
+          "transform",
+          `translate(${PAD + layer * (NODE_W + GAP_X)}, ${PAD + row * (NODE_H + GAP_Y)})`,
+        );
+
+        // The full title survives on hover even when the node is too narrow for it.
+        const full = document.createElementNS(SVG_NS, "title");
+        full.textContent = card.title;
+        node.appendChild(full);
+
+        const box = document.createElementNS(SVG_NS, "rect");
+        box.setAttribute("width", String(NODE_W));
+        box.setAttribute("height", String(NODE_H));
+        box.setAttribute("rx", "12");
+        node.appendChild(box);
+
+        // HTML inside the node lets the browser measure the title itself, so it
+        // ellipsizes cleanly whatever the glyphs — and the full title stays on
+        // hover via the <title> above.
+        const titleBox = document.createElementNS(SVG_NS, "foreignObject");
+        titleBox.setAttribute("x", "12");
+        titleBox.setAttribute("y", "13");
+        titleBox.setAttribute("width", String(NODE_W - 24));
+        titleBox.setAttribute("height", "18");
+        const title = document.createElementNS(XHTML_NS, "div");
+        title.setAttribute("class", "node-title");
+        title.textContent = card.title;
+        titleBox.appendChild(title);
+        node.appendChild(titleBox);
+
+        const status = document.createElementNS(SVG_NS, "text");
+        status.setAttribute("class", "node-status");
+        status.setAttribute("x", "14");
+        status.setAttribute("y", "45");
+        status.textContent = isBlocked ? "Blocked" : cardStatus(card);
+        node.appendChild(status);
+
+        return node;
+      }
+
+      /** The state a card is rendered in — blocked wins over complete. */
+      function cardState(isBlocked, isComplete) {
+        if (isBlocked) return "blocked";
+        return isComplete ? "complete" : "open";
+      }
+
+      /** A card's one-line status for its node. */
+      function cardStatus(card) {
+        if (card.tasks.length === 0) return "No tasks";
+        const done = card.tasks.filter(isTaskComplete).length;
+        return done === card.tasks.length ? "Complete" : `${done}/${card.tasks.length} tasks`;
       }
 
       function renderCard(card) {
         const el = document.createElement("section");
-        const blocked = isCardBlocked(doc, card.id);
+        const state = cardState(isCardBlocked(doc, card.id), isCardComplete(card));
+        const blocked = state === "blocked";
         el.className = blocked ? "card blocked" : "card";
 
         const head = document.createElement("div");
@@ -240,12 +541,12 @@
         const title = document.createElement("h2");
         title.textContent = card.title;
         head.appendChild(title);
-        if (blocked) {
+        if (state === "blocked") {
           const badge = document.createElement("span");
           badge.className = "badge blocked";
           badge.textContent = "Blocked";
           head.appendChild(badge);
-        } else if (isCardComplete(card)) {
+        } else if (state === "complete") {
           const badge = document.createElement("span");
           badge.className = "badge";
           badge.textContent = "Complete";

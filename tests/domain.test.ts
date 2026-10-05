@@ -4,6 +4,7 @@ import {
   addCard,
   addEdge,
   addTask,
+  blockedSet,
   createDocument,
   deleteCard,
   deleteTask,
@@ -17,6 +18,7 @@ import {
   renameTask,
   reorderTasks,
   toggleTaskComplete,
+  topologicalOrder,
   type Card,
   type Document,
   type Result,
@@ -701,5 +703,124 @@ describe("deleteCard and the graph", () => {
     const deleted = valueOf(deleteCard(doc, b));
     expect(deleted.edges).toEqual([]);
     expect(deleted.cards).toHaveLength(1);
+  });
+});
+
+describe("topologicalOrder", () => {
+  /**
+   * Build a document from card titles, in creation order, plus edges given as
+   * `[prerequisite index, dependent index]` pairs. Each card id is `card-<n>`.
+   */
+  function graph(
+    titles: readonly string[],
+    links: readonly (readonly [number, number])[] = [],
+  ): { doc: Document; ids: readonly string[] } {
+    const ids = titles.map((_, index) => `card-${index}`);
+    const doc: Document = {
+      ...createDocument(),
+      cards: titles.map((title, order) => ({ id: ids[order]!, title, tasks: [], order })),
+      edges: links.map(([from, to]) => ({ prerequisiteId: ids[from]!, dependentId: ids[to]! })),
+    };
+    return { doc, ids };
+  }
+
+  it("lists a prerequisite before its dependent, even when created later", () => {
+    // "Build" is created second but must come first: Build → Ship.
+    const { doc, ids } = graph(["Ship", "Build"], [[1, 0]]);
+    expect(topologicalOrder(doc)).toEqual([ids[1], ids[0]]);
+  });
+
+  it("keeps cards nothing forces apart in document order", () => {
+    // A → C; B is independent, so A, then C (earlier in the document), then B.
+    const { doc, ids } = graph(["A", "C", "B"], [[0, 1]]);
+    expect(topologicalOrder(doc)).toEqual([ids[0], ids[1], ids[2]]);
+  });
+
+  it("orders a chain built back to front, and a diamond in one pass", () => {
+    // Created as C, B, A but linked A → B → C.
+    const chain = graph(["C", "B", "A"], [[2, 1], [1, 0]]);
+    expect(topologicalOrder(chain.doc)).toEqual([chain.ids[2], chain.ids[1], chain.ids[0]]);
+
+    // A → B, A → C, B → D, C → D: D waits on both middle cards.
+    const diamond = graph(["A", "B", "C", "D"], [[0, 1], [0, 2], [1, 3], [2, 3]]);
+    const order = topologicalOrder(diamond.doc);
+    expect(order).toHaveLength(4);
+    expect(order).toEqual([diamond.ids[0], diamond.ids[1], diamond.ids[2], diamond.ids[3]]);
+  });
+
+  it("returns nothing for an empty document", () => {
+    expect(topologicalOrder(createDocument())).toEqual([]);
+  });
+});
+
+describe("blockedSet", () => {
+  /** A card with one task; `done` finishes it, so the card reads complete. */
+  function card(id: string, done: boolean, order: number): Card {
+    const task: Task = { id: `${id}-t`, title: `${id}-t`, completed: done, subtasks: [] };
+    return { id, title: id, order, tasks: [task] };
+  }
+
+  /** A document of the given cards, linked by `[prerequisite id, dependent id]`. */
+  function board(cards: readonly Card[], links: readonly (readonly [string, string])[]): Document {
+    return {
+      ...createDocument(),
+      cards,
+      edges: links.map(([prerequisiteId, dependentId]) => ({ prerequisiteId, dependentId })),
+    };
+  }
+
+  it("is empty when nothing is linked", () => {
+    const doc = board([card("A", false, 0), card("B", false, 1)], []);
+    expect(blockedSet(doc).size).toBe(0);
+  });
+
+  it("holds a card whose prerequisite is incomplete, but not the prerequisite", () => {
+    const doc = board([card("A", false, 0), card("B", false, 1)], [["A", "B"]]);
+    expect(blockedSet(doc)).toEqual(new Set(["B"]));
+  });
+
+  it("blocks transitively, even through a complete card", () => {
+    // A is incomplete, B is complete, C waits on B — and so on A.
+    const doc = board(
+      [card("A", false, 0), card("B", true, 1), card("C", false, 2)],
+      [["A", "B"], ["B", "C"]],
+    );
+    expect(blockedSet(doc)).toEqual(new Set(["B", "C"]));
+  });
+
+  it("leaves a card out once its prerequisite completes", () => {
+    const doc = board([card("A", true, 0), card("B", false, 1)], [["A", "B"]]);
+    expect(blockedSet(doc).size).toBe(0);
+  });
+
+  it("agrees with isCardBlocked for every card", () => {
+    // A incomplete → B (complete) → C; D complete → E; F unlinked. B is
+    // complete yet still blocked, and C is blocked through B.
+    const doc = board(
+      [card("A", false, 0), card("B", true, 1), card("C", false, 2), card("D", true, 3), card("E", false, 4), card("F", false, 5)],
+      [["A", "B"], ["B", "C"], ["D", "E"]],
+    );
+    const blocked = blockedSet(doc);
+    expect(blocked).toEqual(new Set(["B", "C"]));
+    for (const c of doc.cards) {
+      expect(blocked.has(c.id)).toBe(isCardBlocked(doc, c.id));
+    }
+  });
+
+  it("agrees with isCardBlocked when a prerequisite names no card", () => {
+    // A malformed document (an imported file could carry one): ghost → A → B.
+    const doc: Document = {
+      ...createDocument(),
+      cards: [card("A", false, 0), card("B", false, 1)],
+      edges: [
+        { prerequisiteId: "ghost", dependentId: "A" },
+        { prerequisiteId: "A", dependentId: "B" },
+      ],
+    };
+    const blocked = blockedSet(doc);
+    expect(blocked).toEqual(new Set(["A", "B"]));
+    for (const c of doc.cards) {
+      expect(blocked.has(c.id)).toBe(isCardBlocked(doc, c.id));
+    }
   });
 });
