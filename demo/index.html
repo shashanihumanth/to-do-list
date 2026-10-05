@@ -13,6 +13,10 @@
   start; Export writes that same JSON out, Import reads one back and replaces
   the document after validating it.
 
+  The palette is pastel-only and lives in design tokens: Auto follows the
+  system preference, Light and Dark are remembered across reloads, and the
+  choice is applied before the first paint so the wrong theme never flashes.
+
   Build once, then serve the repo root (ES modules need HTTP, not file://):
 
       npx tsc               # emits dist/domain.js and dist/storage.js
@@ -23,19 +27,96 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      The theme, applied before the first paint. A module script is deferred,
+      so it would paint the default palette first and flash; this classic
+      script runs while the head is parsed.
+
+      It owns the rule and the storage key and publishes them as `__theme` for
+      the module at the bottom: both halves need the same vocabulary, and only
+      a classic script can run this early, so the definition lives here once
+      rather than being written twice.
+    -->
+    <script>
+      window.__theme = (function () {
+        var KEY = "to-do-list/theme";
+        var systemDark = function () {
+          return window.matchMedia("(prefers-color-scheme: dark)").matches;
+        };
+        return {
+          key: KEY,
+          /* The saved choice, or null when there is none or storage is unreadable. */
+          read: function () {
+            try {
+              return localStorage.getItem(KEY);
+            } catch (error) {
+              return null;
+            }
+          },
+          /* What a stored string means: "light", "dark", or "system". */
+          preference: function (saved) {
+            return saved === "light" || saved === "dark" ? saved : "system";
+          },
+          /* The palette to render: a manual choice wins, otherwise the system. */
+          resolve: function (preference) {
+            return preference === "system" ? (systemDark() ? "dark" : "light") : preference;
+          },
+        };
+      })();
+      document.documentElement.dataset.theme = window.__theme.resolve(
+        window.__theme.preference(window.__theme.read())
+      );
+    </script>
     <title>To-Do List — demo</title>
     <style>
+      /*
+        Pastel-only palette, as design tokens. Light is a set of warm pastel
+        tints; dark is the same desaturated family pushed to deep shades —
+        nothing saturated, nothing pure black or white. Light and dark swap
+        these values and nothing else, so the theme is a data-attribute flip.
+
+        Every colour in the page comes from one of these tokens. The pairs that
+        carry meaning are checked in both themes: text at WCAG AA (4.5:1), and
+        the graphics that carry state — graph edges, node fills and borders,
+        badges — at 3:1. Borders and chips are decoration, below that bar.
+      */
       :root {
-        --bg: #faf7f2;
-        --card: #ffffff;
-        --ink: #2b2b2b;
-        --muted: #8a8378;
-        --accent: #7fb5a9;
-        --accent-ink: #ffffff;
-        --line: #e8e2d8;
-        --flow: #c9c2b6;
+        color-scheme: light;
+        --bg: #faf7f4;
+        --card: #fffdfa;
+        --ink: #322f2b;
+        --muted: #6f6a62;
+        --line: #ece6de;
+        --flow: #948a7b;
+        --accent: #bfe0d3;
+        --accent-ink: #20493d;
+        --accent-soft: #e9f5f0;
+        --accent-strong: #2e6b5a;
+        --accent-line: #559881;
+        --danger: #a8453b;
+        --danger-soft: #fbeae7;
+        --danger-line: #b67469;
+        --chip: #f1ece5;
         --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
         --dur-view: 180ms;
+      }
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+        --bg: #1d1b19;
+        --card: #2a2724;
+        --ink: #f1ece5;
+        --muted: #b0a99f;
+        --line: #3e3a35;
+        --flow: #777168;
+        --accent: #2f5c4e;
+        --accent-ink: #d6f0e6;
+        --accent-soft: #29443c;
+        --accent-strong: #a5d8c6;
+        --accent-line: #6fae99;
+        --danger: #e8a79e;
+        --danger-soft: #46302d;
+        --danger-line: #a87a70;
+        --chip: #35312d;
       }
       * { box-sizing: border-box; }
       body {
@@ -47,24 +128,25 @@
       }
       h1 { font-size: 1.25rem; margin: 0 0 1rem; }
       .toolbar { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.5rem; }
-      .views {
+      /* The global controls sit together at the end of the toolbar: theme, then view. */
+      .toolbar-tail { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-left: auto; }
+      .switch {
         display: inline-flex;
         gap: 0.15rem;
-        margin-left: auto;
         align-self: center;
         padding: 0.2rem;
         border: 1px solid var(--line);
         border-radius: 999px;
         background: var(--card);
       }
-      .views button {
+      .switch button {
         padding: 0.35rem 0.85rem;
         border-radius: 999px;
         background: transparent;
         color: var(--muted);
         transition: background-color 140ms ease, color 140ms ease;
       }
-      .views button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+      .switch button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
       input {
         font: inherit;
         padding: 0.5rem 0.7rem;
@@ -73,6 +155,7 @@
         background: var(--card);
       }
       input[type="text"] { flex: 1; }
+      input[type="checkbox"] { accent-color: var(--accent-strong); }
       button {
         font: inherit;
         padding: 0.5rem 0.9rem;
@@ -82,6 +165,7 @@
         color: var(--accent-ink);
         cursor: pointer;
       }
+      :focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
       /* Two views, one slot. Only the active view is in flow — the other is
          lifted out and hidden, so a tall outline never stretches the graph.
          On a toggle the outgoing view stays put and fades out under the
@@ -120,8 +204,8 @@
       .view-note { margin: 0; color: var(--muted); font-size: 0.85rem; }
       .flow { display: block; max-width: 100%; height: auto; }
       .node rect { fill: var(--card); stroke: var(--line); stroke-width: 1.5; }
-      .node.blocked rect { fill: #fbeceb; stroke: #d9a39d; stroke-dasharray: 5 4; }
-      .node.complete rect { fill: #eef6f3; stroke: #9fcdc1; }
+      .node.blocked rect { fill: var(--danger-soft); stroke: var(--danger-line); stroke-dasharray: 5 4; }
+      .node.complete rect { fill: var(--accent-soft); stroke: var(--accent-line); }
       .node-title {
         font: 600 13px system-ui, sans-serif;
         line-height: 18px;
@@ -132,7 +216,7 @@
       }
       .node.blocked .node-title { color: var(--muted); }
       .node-status { font: 11px system-ui, sans-serif; fill: var(--muted); }
-      .node.blocked .node-status { fill: #b4574e; }
+      .node.blocked .node-status { fill: var(--danger); }
       .edge { fill: none; stroke: var(--flow); stroke-width: 1.5; }
       .edge-head { fill: var(--flow); }
       .cards { display: grid; gap: 1rem; max-width: 40rem; }
@@ -153,8 +237,8 @@
         font-size: 0.75rem;
         padding: 0.15rem 0.5rem;
         border-radius: 999px;
-        background: #eef6f3;
-        color: #4c9a89;
+        background: var(--accent-soft);
+        color: var(--accent-strong);
       }
       ul.tasks { list-style: none; margin: 0; padding: 0; }
       li { padding: 0.3rem 0; }
@@ -180,12 +264,15 @@
       .error {
         flex-basis: 100%;
         margin: 0.3rem 0 0;
-        color: #b4574e;
+        color: var(--danger);
         font-size: 0.85rem;
       }
-      .card.blocked { opacity: 0.72; }
+      /* Blocked is marked by tokens, not by an ancestor opacity: dimming the
+         card would composite its copy below AA in both themes. The dashed
+         rose border matches how the graph draws a blocked node. */
+      .card.blocked { border-style: dashed; border-color: var(--danger-line); }
       .card.blocked h2 { color: var(--muted); }
-      .badge.blocked { background: #fbeceb; color: #b4574e; }
+      .badge.blocked { background: var(--danger-soft); color: var(--danger); }
       button:disabled { opacity: 0.45; cursor: not-allowed; }
       .deps {
         display: flex;
@@ -204,7 +291,7 @@
         gap: 0.3rem;
         padding: 0.15rem 0.35rem 0.15rem 0.6rem;
         border-radius: 999px;
-        background: #f2efe9;
+        background: var(--chip);
         color: var(--ink);
       }
       .dep button {
@@ -234,9 +321,16 @@
       <button id="export" type="button">Export</button>
       <button id="import-button" type="button">Import</button>
       <input id="import-file" type="file" accept="application/json,.json" hidden />
-      <div class="views" role="group" aria-label="View">
-        <button id="view-graph-btn" type="button" aria-pressed="true">Graph</button>
-        <button id="view-list-btn" type="button" aria-pressed="false">List</button>
+      <div class="toolbar-tail">
+        <div class="switch" id="theme-switch" role="group" aria-label="Theme">
+          <button id="theme-auto-btn" type="button" aria-pressed="true">Auto</button>
+          <button id="theme-light-btn" type="button" aria-pressed="false">Light</button>
+          <button id="theme-dark-btn" type="button" aria-pressed="false">Dark</button>
+        </div>
+        <div class="switch" role="group" aria-label="View">
+          <button id="view-graph-btn" type="button" aria-pressed="true">Graph</button>
+          <button id="view-list-btn" type="button" aria-pressed="false">List</button>
+        </div>
       </div>
     </div>
 
@@ -343,6 +437,53 @@
           setView(entry.name, event.detail !== 0);
         });
       }
+
+      // The rule and the storage key live in the <head> bootstrap (window.__theme),
+      // so the pre-paint and the interactive halves cannot drift.
+      const themeRule = window.__theme;
+      const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+      const THEMES = [
+        { preference: "system", button: document.getElementById("theme-auto-btn") },
+        { preference: "light", button: document.getElementById("theme-light-btn") },
+        { preference: "dark", button: document.getElementById("theme-dark-btn") },
+      ];
+
+      let themePreference = themeRule.preference(themeRule.read());
+
+      /**
+       * Apply the theme: a manual choice wins, otherwise the system preference.
+       * The bootstrap already did this before the first paint; this keeps it in
+       * step once the page is interactive, and while Auto is chosen.
+       */
+      function applyTheme() {
+        document.documentElement.dataset.theme = themeRule.resolve(themePreference);
+        for (const entry of THEMES) {
+          entry.button.setAttribute("aria-pressed", String(entry.preference === themePreference));
+        }
+      }
+
+      /** Choose a theme and remember it; Auto clears the saved choice. */
+      function setTheme(preference) {
+        themePreference = preference;
+        try {
+          if (preference === "system") localStorage.removeItem(themeRule.key);
+          else localStorage.setItem(themeRule.key, preference);
+        } catch {
+          showError(toolbar, "This browser would not remember the theme choice.");
+        }
+        applyTheme();
+      }
+
+      for (const entry of THEMES) {
+        entry.button.addEventListener("click", () => setTheme(entry.preference));
+      }
+
+      // While Auto is chosen, the system preference can change under us.
+      darkQuery.addEventListener("change", () => {
+        if (themePreference === "system") applyTheme();
+      });
+
+      applyTheme();
 
       /** Replace any inline rejection in `container` with `message`. */
       function showError(container, message, afterNode) {
