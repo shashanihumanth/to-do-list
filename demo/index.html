@@ -1,0 +1,199 @@
+<!doctype html>
+<!--
+  Minimal demo of the domain model (Ticket #1). A dependency-free list UI that
+  renders cards and their tasks and lets you tick a task complete.
+
+  Build once, then serve the repo root (ES modules need HTTP, not file://):
+
+      npx tsc               # emits dist/domain.js from src/domain.ts
+      npx serve .          # or: python3 -m http.server 8000
+      open http://localhost:8000/demo/
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>To-Do List — demo</title>
+    <style>
+      :root {
+        --bg: #faf7f2;
+        --card: #ffffff;
+        --ink: #2b2b2b;
+        --muted: #8a8378;
+        --accent: #7fb5a9;
+        --accent-ink: #ffffff;
+        --line: #e8e2d8;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 2rem;
+        font-family: system-ui, sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+      }
+      h1 { font-size: 1.25rem; margin: 0 0 1rem; }
+      .toolbar { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
+      input {
+        font: inherit;
+        padding: 0.5rem 0.7rem;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--card);
+      }
+      input[type="text"] { flex: 1; }
+      button {
+        font: inherit;
+        padding: 0.5rem 0.9rem;
+        border: 0;
+        border-radius: 8px;
+        background: var(--accent);
+        color: var(--accent-ink);
+        cursor: pointer;
+      }
+      .cards { display: grid; gap: 1rem; max-width: 40rem; }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1rem 1.25rem;
+      }
+      .card-head {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 0.75rem;
+      }
+      .card-head h2 { font-size: 1rem; margin: 0; flex: 1; }
+      .badge {
+        font-size: 0.75rem;
+        padding: 0.15rem 0.5rem;
+        border-radius: 999px;
+        background: #eef6f3;
+        color: #4c9a89;
+      }
+      ul.tasks { list-style: none; margin: 0; padding: 0; }
+      li { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; }
+      li.done > label { text-decoration: line-through; color: var(--muted); }
+      .empty { color: var(--muted); font-size: 0.9rem; }
+    </style>
+  </head>
+  <body>
+    <h1>To-Do List — demo</h1>
+
+    <div class="toolbar">
+      <input id="new-card" type="text" placeholder="New card title…" />
+      <button id="add-card">Add card</button>
+    </div>
+
+    <div class="cards" id="cards"></div>
+
+    <script type="module">
+      import {
+        addCard,
+        addTask,
+        createDocument,
+        isCardComplete,
+        toggleTaskComplete,
+      } from "../dist/domain.js";
+
+      let doc = createDocument();
+
+      const cardsEl = document.getElementById("cards");
+      const newCardInput = document.getElementById("new-card");
+
+      function render() {
+        cardsEl.replaceChildren();
+        if (doc.cards.length === 0) {
+          const empty = document.createElement("p");
+          empty.className = "empty";
+          empty.textContent = "No cards yet — add one above.";
+          cardsEl.appendChild(empty);
+        }
+        for (const card of doc.cards) {
+          cardsEl.appendChild(renderCard(card));
+        }
+      }
+
+      function renderCard(card) {
+        const el = document.createElement("section");
+        el.className = "card";
+
+        const head = document.createElement("div");
+        head.className = "card-head";
+        const title = document.createElement("h2");
+        title.textContent = card.title;
+        head.appendChild(title);
+        if (isCardComplete(card)) {
+          const badge = document.createElement("span");
+          badge.className = "badge";
+          badge.textContent = "Complete";
+          head.appendChild(badge);
+        }
+        el.appendChild(head);
+
+        const list = document.createElement("ul");
+        list.className = "tasks";
+        for (const task of card.tasks) list.appendChild(renderTask(task));
+        el.appendChild(list);
+
+        const add = document.createElement("div");
+        add.className = "toolbar";
+        const input = document.createElement("input");
+        input.type = "text";
+        input.placeholder = "New task…";
+        const button = document.createElement("button");
+        button.textContent = "Add task";
+        button.addEventListener("click", () => {
+          const result = addTask(doc, card.id, input.value);
+          if (result.ok) {
+            doc = result.value;
+            render();
+          } else {
+            alert(`Could not add task: ${result.error}`);
+          }
+        });
+        add.append(input, button);
+        el.appendChild(add);
+
+        return el;
+      }
+
+      function renderTask(task) {
+        const li = document.createElement("li");
+        if (task.completed) li.classList.add("done");
+
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = task.completed;
+        input.addEventListener("change", () => {
+          const result = toggleTaskComplete(doc, task.id);
+          if (result.ok) {
+            doc = result.value;
+            render();
+          }
+        });
+        li.appendChild(input);
+
+        const label = document.createElement("label");
+        label.textContent = task.title;
+        li.appendChild(label);
+
+        return li;
+      }
+
+      document.getElementById("add-card").addEventListener("click", () => {
+        const title = newCardInput.value;
+        if (title.trim() === "") return;
+        const result = addCard(doc, title);
+        if (result.ok) {
+          doc = result.value;
+          newCardInput.value = "";
+          render();
+        }
+      });
+
+      render();
+    </script>
+  </body>
+</html>
